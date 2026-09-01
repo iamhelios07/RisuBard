@@ -11,7 +11,8 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
+const { Transform, pipeline } = require('stream');
 
 const REPO = 'rpaddict/RisuBard';
 const ROOT = path.resolve(__dirname, '..');
@@ -69,12 +70,16 @@ const MAX_REDIRECTS = 10;
 function httpsGet(url, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         if (redirectCount > MAX_REDIRECTS) return reject(new Error('Too many redirects'));
-        const get = url.startsWith('https') ? https.get : http.get;
-        get(url, { headers: { 'User-Agent': 'RisuBard-Updater' } }, (res) => {
+        const parsedUrl = new URL(url);
+        const get = parsedUrl.protocol === 'https:' ? https.get : http.get;
+        get(parsedUrl, { headers: { 'User-Agent': 'RisuBard-Updater' } }, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                return httpsGet(res.headers.location, redirectCount + 1).then(resolve, reject);
+                res.resume();
+                const redirectUrl = new URL(res.headers.location, parsedUrl).toString();
+                return httpsGet(redirectUrl, redirectCount + 1).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
+                res.resume();
                 return reject(new Error(`HTTP ${res.statusCode}`));
             }
             const chunks = [];
@@ -88,32 +93,89 @@ function httpsGet(url, redirectCount = 0) {
 function downloadToFile(url, dest, redirectCount = 0) {
     return new Promise((resolve, reject) => {
         if (redirectCount > MAX_REDIRECTS) return reject(new Error('Too many redirects'));
-        const file = fs.createWriteStream(dest);
-        const get = url.startsWith('https') ? https.get : http.get;
-        get(url, { headers: { 'User-Agent': 'RisuBard-Updater' } }, (res) => {
+        const parsedUrl = new URL(url);
+        const get = parsedUrl.protocol === 'https:' ? https.get : http.get;
+        get(parsedUrl, { headers: { 'User-Agent': 'RisuBard-Updater' } }, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                file.close();
-                fs.unlinkSync(dest);
-                return downloadToFile(res.headers.location, dest, redirectCount + 1).then(resolve, reject);
+                res.resume();
+                const redirectUrl = new URL(res.headers.location, parsedUrl).toString();
+                return downloadToFile(redirectUrl, dest, redirectCount + 1).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
-                file.close();
+                res.resume();
                 return reject(new Error(`HTTP ${res.statusCode}`));
             }
+
             const total = parseInt(res.headers['content-length'] || '0', 10);
             let downloaded = 0;
-            res.on('data', (chunk) => {
-                downloaded += chunk.length;
-                if (total > 0) {
-                    const pct = ((downloaded / total) * 100).toFixed(1);
-                    process.stdout.write(`\r[updater] Downloading... ${pct}%  `);
-                }
+            let lastPct = '';
+            const progress = new Transform({
+                transform(chunk, encoding, callback) {
+                    downloaded += chunk.length;
+                    if (total > 0) {
+                        const pct = ((downloaded / total) * 100).toFixed(1);
+                        if (pct !== lastPct) {
+                            lastPct = pct;
+                            process.stdout.write(`\r[updater] Downloading... ${pct}%  `);
+                        }
+                    }
+                    callback(null, chunk);
+                },
             });
-            res.pipe(file);
-            file.on('finish', () => { file.close(); process.stdout.write('\n'); resolve(); });
-            file.on('error', reject);
+
+            pipeline(res, progress, fs.createWriteStream(dest), (err) => {
+                process.stdout.write('\n');
+                if (!err) return resolve();
+                fs.rm(dest, { force: true }, () => reject(err));
+            });
         }).on('error', reject);
     });
+}
+
+function extractArchive(archivePath, destinationPath) {
+    const archiveName = path.basename(archivePath).toLowerCase();
+
+    if (archiveName.endsWith('.zip')) {
+        try {
+            execFileSync(isWin ? 'tar.exe' : 'tar', [
+                '-xf',
+                archivePath,
+                '-C',
+                destinationPath,
+            ], { stdio: 'inherit' });
+            return;
+        } catch (e) {
+            if (!isWin) throw e;
+            log('tar.exe extraction failed; falling back to PowerShell...');
+            execFileSync('powershell.exe', [
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                'Expand-Archive -LiteralPath $env:RISUBARD_ARCHIVE -DestinationPath $env:RISUBARD_DESTINATION -Force',
+            ], {
+                stdio: 'inherit',
+                env: {
+                    ...process.env,
+                    RISUBARD_ARCHIVE: archivePath,
+                    RISUBARD_DESTINATION: destinationPath,
+                },
+            });
+            return;
+        }
+    }
+
+    if (archiveName.endsWith('.tar.gz') || archiveName.endsWith('.tgz')) {
+        execFileSync(isWin ? 'tar.exe' : 'tar', [
+            '-xzf',
+            archivePath,
+            '-C',
+            destinationPath,
+        ], { stdio: 'inherit' });
+        return;
+    }
+
+    throw new Error(`Unsupported archive format: ${path.basename(archivePath)}`);
 }
 
 function getPlatformSuffix() {
@@ -169,22 +231,41 @@ function restoreBackupIntoRoot(backupDir, overwrite = true) {
 
 function listFilesRecursive(dir, baseDir = dir, files = []) {
     if (!fs.existsSync(dir)) return files;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            listFilesRecursive(fullPath, baseDir, files);
-            continue;
-        }
-        if (entry.isFile()) {
-            files.push(path.relative(baseDir, fullPath));
+
+    function walk(currentDir) {
+        for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+            const fullPath = path.join(currentDir, entry.name);
+            if (entry.isDirectory()) {
+                walk(fullPath);
+                continue;
+            }
+            if (entry.isFile()) {
+                files.push(path.relative(baseDir, fullPath));
+            }
         }
     }
+
+    walk(dir);
     files.sort();
     return files;
 }
 
 function hashFile(filePath) {
-    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    const hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    const fd = fs.openSync(filePath, 'r');
+
+    try {
+        let bytesRead;
+        do {
+            bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+            if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+        } while (bytesRead > 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+
+    return hash.digest('hex');
 }
 
 function areDirectoriesEquivalent(a, b) {
@@ -203,6 +284,16 @@ function areDirectoriesEquivalent(a, b) {
     }
 
     return true;
+}
+
+function findPortableAsset(release, suffix) {
+    const expectedExtension = isWin ? '.zip' : '.tar.gz';
+    const expectedEnding = `-${suffix}${expectedExtension}`.toLowerCase();
+    return (release.assets || []).find((asset) => (
+        typeof asset.name === 'string'
+        && typeof asset.browser_download_url === 'string'
+        && asset.name.toLowerCase().endsWith(expectedEnding)
+    ));
 }
 
 async function main() {
@@ -224,7 +315,7 @@ async function main() {
     log(`New version available: ${latest}`);
 
     const suffix = getPlatformSuffix();
-    const asset = (release.assets || []).find(a => a.name.includes(suffix));
+    const asset = findPortableAsset(release, suffix);
     if (!asset) {
         error(`No portable package found for ${suffix}. Download manually from:\n  ${release.html_url}`);
     }
@@ -247,11 +338,7 @@ async function main() {
     log('Extracting...');
     const extractedPath = path.join(tmpDir, 'extracted');
     fs.mkdirSync(extractedPath, { recursive: true });
-    if (asset.name.endsWith('.zip')) {
-        execSync(`powershell -Command "Expand-Archive -Path '${downloadPath}' -DestinationPath '${extractedPath}' -Force"`, { stdio: 'inherit' });
-    } else {
-        execSync(`tar -xzf "${downloadPath}" -C "${extractedPath}"`, { stdio: 'inherit' });
-    }
+    extractArchive(downloadPath, extractedPath);
 
     const extractedDir = path.join(tmpDir, 'extracted');
     const extractedRoot = resolveExtractedRoot(extractedDir);

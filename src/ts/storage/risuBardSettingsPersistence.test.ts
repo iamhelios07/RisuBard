@@ -13,9 +13,43 @@ vi.mock('../globalApi.svelte', () => ({
 vi.mock('../alert', () => ({ notifySuccess: vi.fn(), alertError: vi.fn() }))
 vi.mock('../../lang', () => ({ language: {}, changeLanguage: vi.fn() }))
 
-const { getDatabase, setDatabase } = await import('./database.svelte')
+const { getDatabase, newChatModelDefaults, normalizeChat, setDatabase } = await import('./database.svelte')
 
 describe('RisuBard settings persistence', () => {
+    test.each([
+        { stored: true, expected: true },
+        { stored: false, expected: false },
+        { stored: 'true', expected: false },
+        { stored: undefined, expected: false },
+    ])('normalizes the BardWiki Markdown preview setting: $stored', ({
+        stored, expected,
+    }) => {
+        setDatabase({
+            characters: [], formatingOrder: ['main'], loreBook: [],
+            personas: [], username: 'User', userIcon: '', userNote: '',
+            risuBardWikiMarkdownPreview: stored,
+        } as any)
+
+        expect(getDatabase().risuBardWikiMarkdownPreview).toBe(expected)
+    })
+
+    test('defaults legacy HypaMemory controls and new chats to off', () => {
+        setDatabase({
+            characters: [], formatingOrder: ['main'], loreBook: [],
+            personas: [], username: 'User', userIcon: '', userNote: '',
+        } as any)
+
+        expect(getDatabase()).toMatchObject({
+            hypaV3: false,
+            memoryAlgorithmType: 'none',
+            showMenuHypaMemoryModal: false,
+        })
+        expect(newChatModelDefaults()).toMatchObject({ supaMemory: false })
+        expect(normalizeChat({ message: [], note: '', name: '', localLore: [] })).toMatchObject({
+            supaMemory: false,
+        })
+    })
+
     test.each([
         { recent: 250, response: 300, expectedRecent: 250, expectedResponse: 300 },
         { recent: 0, response: Infinity, expectedRecent: 12, expectedResponse: 12 },

@@ -13,7 +13,10 @@ const mocks = vi.hoisted(() => ({
     createAuth: vi.fn(async () => 'token'),
     requestImmediateSave: vi.fn(async () => undefined),
     alertConfirmMulti: vi.fn(async () => 0),
-    db: { characters: [] as Array<Record<string, any>> },
+    db: {
+        characters: [] as Array<Record<string, any>>,
+        risuBardWikiMarkdownPreview: undefined as boolean | undefined,
+    },
 }))
 
 vi.mock('src/ts/risubard/memoryWiki', async (importOriginal) => ({
@@ -71,9 +74,26 @@ afterEach(async () => {
     document.body.replaceChildren()
     vi.clearAllMocks()
     vi.unstubAllGlobals()
+    mocks.db.risuBardWikiMarkdownPreview = undefined
 })
 
 describe('RisuBardWikiEditor', () => {
+    it('uses an explicit BARDCHAT update set instead of older automatic badges', async () => {
+        mounted = mount(RisuBardWikiEditor, {
+            target: document.body,
+            props: {
+                characterId: 'character', chatId: 'chat',
+                documents,
+                highlightedDocumentIds: ['character.lavian'],
+            },
+        })
+        await tick()
+
+        const badges = [...document.querySelectorAll('[data-wiki-recent-update]')]
+        expect(badges.map((badge) => badge.parentElement?.getAttribute('aria-label')))
+            .toEqual(['라비안 '])
+    })
+
     it('shows recent update badges on the right of root and folder pages without changing their selection', async () => {
         mounted = mount(RisuBardWikiEditor, {
             target: document.body,
@@ -132,6 +152,19 @@ describe('RisuBardWikiEditor', () => {
         expect(document.body.textContent).not.toContain('context: auto')
     })
 
+    it('offers a creature document type', async () => {
+        mounted = mount(RisuBardWikiEditor, {
+            target: document.body,
+            props: { characterId: 'character', chatId: 'chat', documents },
+        })
+        await tick()
+
+        const option = document.querySelector<HTMLOptionElement>(
+            '[aria-label="항목 유형"] option[value="creature"]'
+        )
+        expect(option?.textContent).toBe('종족·생물')
+    })
+
     it('keeps a visible vertical scrollbar in the Markdown editor', () => {
         const source = readFileSync(
             'src/lib/Others/RisuBardWikiEditor.svelte',
@@ -176,6 +209,28 @@ describe('RisuBardWikiEditor', () => {
         expect(row).not.toBeNull()
         expect(row.classList.contains('dangling-link')).toBe(true)
         expect(row.querySelector('[data-wiki-repair-link]')).toBeNull()
+    })
+
+    it('shows duplicate passage warnings without offering automatic repair', async () => {
+        mounted = mount(RisuBardWikiEditor, {
+            target: document.body,
+            props: {
+                characterId: 'character', chatId: 'chat', documents,
+                health: {
+                    danglingLinks: [],
+                    unlinkedDocumentIds: [],
+                    duplicatePassages: [{
+                        documentIds: ['character.lavian', 'event.turn'],
+                    }],
+                } as any,
+            },
+        })
+        await tick()
+
+        expect(document.body.textContent).toContain('본문 중복 1')
+        expect(document.querySelectorAll('[data-wiki-duplicate-document]'))
+            .toHaveLength(2)
+        expect(document.querySelector('[data-wiki-repair-duplicate]')).toBeNull()
     })
 
     it('toggles a live, safe Markdown preview from the editor toolbar', async () => {
@@ -272,6 +327,37 @@ describe('RisuBardWikiEditor', () => {
         expect(editor.dataset.editorFocus).toBe('true')
         expect(editor.dataset.editorExpanded).toBe('true')
         expect(onFocusModeChange).toHaveBeenLastCalledWith(true)
+    })
+
+    it('restores the Markdown preview toggle from the persisted database setting', async () => {
+        mocks.db.risuBardWikiMarkdownPreview = true
+        mounted = mount(RisuBardWikiEditor, {
+            target: document.body,
+            props: { characterId: 'character', chatId: 'chat', documents },
+        })
+        await tick()
+
+        const toggle = document.querySelector<HTMLInputElement>(
+            '[data-wiki-markdown-toggle]'
+        )!
+        expect(toggle.checked).toBe(true)
+        expect(document.querySelector('[data-wiki-markdown-preview]')).not.toBeNull()
+
+        toggle.click()
+        await tick()
+        expect(mocks.db.risuBardWikiMarkdownPreview).toBe(false)
+
+        await unmount(mounted)
+        mounted = mount(RisuBardWikiEditor, {
+            target: document.body,
+            props: { characterId: 'character', chatId: 'chat', documents },
+        })
+        await tick()
+
+        expect(document.querySelector<HTMLInputElement>(
+            '[data-wiki-markdown-toggle]'
+        )?.checked).toBe(false)
+        expect(document.querySelector('[data-wiki-markdown-preview]')).toBeNull()
     })
 
     it('uses an explicit mobile overlay drawer instead of stacking the tree above the editor', () => {

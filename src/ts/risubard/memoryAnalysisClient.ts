@@ -18,7 +18,14 @@ import {
     normalizeNarrativeBaseline,
     parseSingleJsonObject,
 } from '../../../packages/risubard-core/src/modelOutput'
-import { modelOutputRepairInstruction, readModelResponseText, runValidatedModelRequest, type ModelOutputError, type ModelResponse } from '../../../packages/risubard-core/src/modelResponse'
+import {
+    modelOutputRepairInstruction,
+    NativeStructuredOutputUnavailableError,
+    readModelResponseText,
+    runValidatedModelRequest,
+    type ModelOutputError,
+    type ModelResponse,
+} from '../../../packages/risubard-core/src/modelResponse'
 import {
     loadNarrativeInquiry,
 } from './narrativeContext'
@@ -41,6 +48,7 @@ import {
     memoryWriterDraftSchema,
     rebootBatchDraftSchema,
 } from '../../../server/node/risubard-memory-writer'
+import { createStructuredOutputFallbackMessage } from '../process/request/structuredOutputFallback'
 
 interface StoredMessage {
     role?: unknown
@@ -87,6 +95,21 @@ interface MemoryAnalysisClientOptions {
 }
 
 let analysisTokenizer: Tiktoken | undefined
+
+const NATIVE_SCHEMA_REJECTION = /(?:json[ _-]?schema|response[_ ]?format|response[_ ]?schema|responseformat|structured[ -]?output|response[_ ]?mime)/i
+const AMBIGUOUS_INVALID_ARGUMENT = /^(?:\[[^\]\r\n]{1,80}\]\s*)?(?:request contains an )?invalid[_ ]argument\.?$/i
+const BARE_HTTP_400 = /^HTTP\s+400\.?$/i
+
+function rejectsNativeSchema(response: MemoryAnalysisModelResponse): boolean {
+    if (response.type === 'success' || response.noRetry
+        || response.toolExecuted || typeof response.result !== 'string') {
+        return false
+    }
+    const reason = response.result.trim()
+    return NATIVE_SCHEMA_REJECTION.test(reason)
+        || AMBIGUOUS_INVALID_ARGUMENT.test(reason)
+        || BARE_HTTP_400.test(reason)
+}
 
 function countAnalysisTokens(value: string): number {
     analysisTokenizer ??= get_encoding('cl100k_base')
@@ -659,6 +682,7 @@ export function createStoredResponseMemoryAnalysis(
             currentInput: string
             tokenBudget?: {
                 target: number
+                events?: number
                 maximum: number
             }
         }) {
@@ -744,7 +768,7 @@ export function createStoredResponseMemoryAnalysis(
             chatId: string
             documentId?: string
             type: 'character' | 'location' | 'scene' | 'faction' | 'item'
-                | 'concept' | 'other'
+                | 'creature' | 'concept' | 'other'
             title: string
             aliases?: string[]
             sourceMessageIds: string[]
@@ -801,14 +825,40 @@ export function createStoredResponseMemoryAnalysis(
         nativeV2Analysis: options.nativeV2Analysis,
         onError: options.onError,
         async analyze(request, signal) {
-            const boundedInput = fitAnalysisInput(
+            const nativeDraft = ['memory-draft', 'reboot-batch', 'canonical-batch']
+                .includes(request.format ?? '')
+            const structuredSchema = request.format === 'markdown'
+                ? undefined
+                : request.format === 'memory-draft'
+                    ? memoryWriterDraftSchema
+                    : request.format === 'reboot-batch'
+                        ? request.responseSchema ?? rebootBatchDraftSchema
+                        : request.format === 'canonical-batch'
+                            ? request.responseSchema ?? canonicalBatchSchema
+                            : request.schemaVersion === 2
+                                ? narrativeGraphDeltaSchema
+                                : memoryDeltaSchema
+            const promptSchemaMessage = request.structuredOutputMode === 'prompt'
+                && nativeDraft && structuredSchema
+                ? createStructuredOutputFallbackMessage(
+                    JSON.parse(structuredSchema) as Record<string, unknown>
+                )
+                : null
+            const usePromptSchemaFallback = Boolean(
+                promptSchemaMessage?.content
+            )
+            const requestSystem = [
                 request.system,
+                promptSchemaMessage?.content,
+            ].filter(Boolean).join('\n\n')
+            const boundedInput = fitAnalysisInput(
+                requestSystem,
                 request.input,
                 request.inputTokenLimit
             )
             const modelCall: MemoryAnalysisModelCall = {
                 formated: [
-                    { role: 'system', content: request.system },
+                    { role: 'system', content: requestSystem },
                     { role: 'user', content: boundedInput },
                 ],
                 useStreaming: false,
@@ -824,33 +874,62 @@ export function createStoredResponseMemoryAnalysis(
                     realChatId: request.sessionChatId,
                     logSource: 'memory' as const,
                     logPurpose: request.format === 'canonical-batch'
+                        || request.format === 'markdown'
                         ? 'bardwiki-canonical-update' as const
                         : 'bardwiki-analysis' as const,
                 } : {}),
                 ...(request.format === 'markdown'
+                    || usePromptSchemaFallback
                     ? {}
-                    : {
-                        schema: request.format === 'memory-draft'
-                            ? memoryWriterDraftSchema
-                            : request.format === 'reboot-batch'
-                                ? request.responseSchema
-                                    ?? rebootBatchDraftSchema
-                            : request.format === 'canonical-batch'
-                                ? request.responseSchema
-                                    ?? canonicalBatchSchema
-                                : request.schemaVersion === 2
-                                    ? narrativeGraphDeltaSchema
-                                    : memoryDeltaSchema,
-                    }),
+                    : { schema: structuredSchema }),
             }
-            const nativeDraft = ['memory-draft', 'reboot-batch', 'canonical-batch'].includes(request.format ?? '')
             const requestResponse = async (feedback?: ModelOutputError) => {
-                    const response = await requestMemoryModel({
+                    let response = await requestMemoryModel({
                         ...modelCall,
-                        formated: [{ role: 'system', content: request.system
+                        formated: [{ role: 'system', content: requestSystem
                             + (feedback ? `\n\n${modelOutputRepairInstruction(feedback)}` : '') },
                         modelCall.formated[1]],
                     }, signal)
+                    if (nativeDraft && modelCall.schema
+                        && rejectsNativeSchema(response)) {
+                        if (request.structuredOutputMode === 'native') {
+                            throw new NativeStructuredOutputUnavailableError()
+                        }
+                        const fallbackMessage = createStructuredOutputFallbackMessage(
+                            JSON.parse(modelCall.schema) as Record<string, unknown>
+                        )
+                        if (fallbackMessage
+                            && typeof fallbackMessage.content === 'string') {
+                            const fallbackSystem = [
+                                requestSystem,
+                                feedback
+                                    ? modelOutputRepairInstruction(feedback)
+                                    : '',
+                                fallbackMessage.content,
+                            ].filter(Boolean).join('\n\n')
+                            response = {
+                                ...await requestMemoryModel({
+                                    ...modelCall,
+                                    schema: undefined,
+                                    formated: [
+                                        {
+                                            role: 'system',
+                                            content: fallbackSystem,
+                                        },
+                                        {
+                                            role: 'user',
+                                            content: fitAnalysisInput(
+                                                fallbackSystem,
+                                                request.input,
+                                                request.inputTokenLimit
+                                            ),
+                                        },
+                                    ],
+                                }, signal),
+                                noRetry: true,
+                            }
+                        }
+                    }
                     if (response.type !== 'success') {
                         throw new Error(modelFailureMessage('Memory analysis model request failed', response))
                     }

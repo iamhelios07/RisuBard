@@ -7,7 +7,8 @@ type CanonicalType = Exclude<WikiDocument['type'], 'event'>
 type EditableType = WikiDocument['type']
 
 const canonicalTypes: CanonicalType[] = [
-    'character', 'location', 'scene', 'faction', 'item', 'concept', 'other',
+    'character', 'location', 'scene', 'faction', 'creature', 'item',
+    'concept', 'other',
 ]
 const editableTypes: EditableType[] = [...canonicalTypes, 'event']
 
@@ -339,6 +340,7 @@ export async function executeDirectWikiCommand(input: {
     contextSources?: DirectWikiContextSources
     maxTokens: number
     requestModel(request: DirectWikiModelCall): Promise<DirectWikiModelResponse>
+    beforeApply?: () => Promise<void>
     saveDocument(input: {
         documentId?: string
         expectedContentHash?: string
@@ -426,6 +428,7 @@ export async function executeDirectWikiCommand(input: {
         }
         throw error
     })
+    await input.beforeApply?.()
     const byId = new Map(input.documents.map((document) => [
         document.id,
         document,

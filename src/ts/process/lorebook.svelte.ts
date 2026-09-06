@@ -20,7 +20,7 @@ import {
     type LorebookMatchingMode,
 } from './lorebookMatching';
 import { BardLoreBudgetError, selectBardLoreEntries } from '../lorebook/bardLoreRetrieval';
-import { createBardLoreSettings, type BardLoreEntry } from '../lorebook/bardLore';
+import { createBardLoreSettings, materializeBardLoreEntries, type BardLoreEntry } from '../lorebook/bardLore';
 import type { RequestInjectionKind } from '../status/requestStatus';
 
 export function addLorebook(type:number) {
@@ -99,19 +99,28 @@ export async function loadLoreBookV3Prompt(search?: { character: character; text
     let characterLore = char.globalLore ?? []
     const bardState = char.bardLore?.mode === 'bard' ? char.bardLore : undefined
     const bardSettings = bardState ? createBardLoreSettings(bardState.settings) : undefined
+    const bardEntries = bardState ? materializeBardLoreEntries(bardState, characterLore) : []
 
     if(bardState && bardSettings){
         const tokenCounts: Record<string, number> = {}
-        await Promise.all(bardState.entries.filter((entry) => entry.bard.injection !== 'index-only').map(async (entry) => {
+        await Promise.all(bardEntries.filter((entry) => entry.bard.injection !== 'index-only').map(async (entry) => {
             tokenCounts[entry.id] = await tokenize(risuChatParser(entry.content, {chara: char}))
         }))
         const query = currentChat
             .slice(Math.max(0, currentChat.length - bardSettings.contextMessages))
             .map((message) => message.data)
             .join('\n')
+        let priorityQuery = ''
+        for (let index = currentChat.length - 1; index >= 0; index -= 1) {
+            const message = currentChat[index]
+            if (message.disabled || message.isComment) continue
+            if (message.role === 'user') priorityQuery = message.data
+            break
+        }
         const selection = selectBardLoreEntries({
             query,
-            entries: bardState.entries,
+            priorityQuery,
+            entries: bardEntries,
             tokenCounts,
             settings: bardSettings,
             scopeAliases: [char.name],
@@ -728,6 +737,32 @@ export async function loadLoreBookV3Prompt(search?: { character: character; text
     const activeSources = activesFiltered.map((active) => ({
         sourceIdentity: active.sourceIdentity,
     }))
+    const bardWikiEntityHints = activesFiltered.flatMap((active) => {
+        if (active.sourceIdentity.scopeId !== characterScopeId) return []
+        const entry = active.sourceIdentity.entry
+        const bardEntry = 'bard' in entry ? entry as BardLoreEntry : undefined
+        if (bardEntry && bardEntry.bard.kind !== 'character') return []
+        const rawNames = bardEntry
+            ? [entry.comment, ...bardEntry.bard.aliases]
+            : [
+                entry.comment,
+                ...(typeof entry.key === 'string' ? entry.key.split(',') : []),
+                ...(typeof entry.secondkey === 'string' ? entry.secondkey.split(',') : []),
+            ]
+        const seen = new Set<string>()
+        const names = rawNames.flatMap((value) => {
+            if (typeof value !== 'string') return []
+            const name = value.trim().slice(0, 128)
+            const key = name.normalize('NFKC').toLocaleLowerCase()
+            if (!name || seen.has(key)) return []
+            seen.add(key)
+            return [name]
+        }).slice(0, 16)
+        return names.length > 0 ? [{
+            kind: 'character' as const,
+            names,
+        }] : []
+    }).slice(0, 12)
 
     //I know this will make token count wrong, but performance is more important here
 
@@ -758,6 +793,7 @@ export async function loadLoreBookV3Prompt(search?: { character: character; text
     return {
         actives: activesResorted.reverse(),
         activeSources,
+        bardWikiEntityHints,
         matchLog: matchLog,
     }
 

@@ -1,4 +1,5 @@
 import { Ollama } from 'ollama/dist/browser.mjs';
+import { buildOllamaChatRequest, createOllamaFetch } from './ollamaRequest';
 import { language } from "../../../lang";
 import { globalFetch, fetchNative } from "../../globalApi.svelte";
 import { getModelInfo, LLMFlags, LLMFormat, type LLMModel } from "../../model/modellist";
@@ -31,7 +32,7 @@ import { runTrigger } from "../triggers";
 import { requestClaude } from './anthropic';
 import { requestGoogleCloudVertex } from './google';
 import { requestOpenAI, requestOpenAILegacyInstruct, requestOpenAIResponseAPI } from "./openAI/requests";
-import { applyParameters, collectStreamingText, type ModelModeExtended } from './shared';
+import { applyParameters, collectStreamingText, resolveApiSamplingParameter, resolveStoredSamplingParameter, resolveStoredTemperature, type ModelModeExtended } from './shared';
 import {
     sendChatRequest, streamChatRequest, previewChatRequest,
     sendAnthropicChatRequest, streamAnthropicChatRequest, previewAnthropicChatRequest,
@@ -59,6 +60,7 @@ import {
 import {
     createPluginRequestEvidenceRecorder,
     formatPluginProviderFailure,
+    runPluginProviderWithTimeout,
 } from './pluginRequestEvidence';
 import { isLocalNetworkUrl } from "src/ts/network/localNetwork";
 import { createRequestLogScope, recordRequestLog, requestLogEnabled, type RequestLogRoute, type RequestLogSource, type RequestLogUsage } from "src/ts/requestLog";
@@ -486,7 +488,9 @@ export async function requestChatDataMain(arg:requestDataArgument, model:ModelMo
 
     targ.formated = safeStructuredClone(arg.formated)
     targ.maxTokens = arg.maxTokens ??db.maxResponse
-    targ.temperature = arg.temperature ?? (db.temperature / 100)
+    targ.temperature = arg.temperature === undefined
+        ? resolveStoredTemperature(db.temperature)
+        : resolveApiSamplingParameter('temperature', arg.temperature)
     targ.bias = arg.bias
     targ.currentChar = arg.currentChar
     targ.useStreaming = arg.forceStreaming ? true : db.useStreaming && arg.useStreaming
@@ -1435,7 +1439,9 @@ async function requestOobaLegacy(arg:RequestDataArgumentExtended):Promise<reques
     bodyTemplate = {
         'max_new_tokens': db.maxResponse,
         'do_sample': db.ooba.do_sample,
-        'temperature': (db.temperature / 100),
+        'temperature': arg.temperature === undefined
+            ? resolveStoredTemperature(db.temperature)
+            : resolveApiSamplingParameter('temperature', arg.temperature),
         'top_p': db.ooba.top_p,
         'typical_p': db.ooba.typical_p,
         'repetition_penalty': db.ooba.repetition_penalty,
@@ -1452,7 +1458,7 @@ async function requestOobaLegacy(arg:RequestDataArgumentExtended):Promise<reques
         'stopping_strings': stopStrings,
         'seed': -1,
         add_bos_token: db.ooba.add_bos_token,
-        topP: db.top_p,
+        topP: resolveStoredSamplingParameter('top_p', db.top_p),
         prompt: prompt
     }
 
@@ -1565,15 +1571,22 @@ async function requestOoba(arg:RequestDataArgumentExtended):Promise<requestDataR
             return risuChatParser(v.replace(/\\n/g, "\n"))
         })
     }
+    const presencePenalty = arg.PresensePenalty === undefined
+        ? resolveStoredSamplingParameter('presence_penalty', db.PresensePenalty)
+        : resolveApiSamplingParameter('presence_penalty', arg.PresensePenalty)
+    const frequencyPenalty = arg.frequencyPenalty === undefined
+        ? resolveStoredSamplingParameter('frequency_penalty', db.frequencyPenalty)
+        : resolveApiSamplingParameter('frequency_penalty', arg.frequencyPenalty)
+    const topP = resolveStoredSamplingParameter('top_p', db.top_p)
     let bodyTemplate:Record<string, any> = {
         'prompt': prompt,
-        presence_penalty: arg.PresensePenalty || (db.PresensePenalty / 100),
-        frequency_penalty: arg.frequencyPenalty || (db.frequencyPenalty / 100),
         logit_bias: {},
         max_tokens: maxTokens,
         stop: stopStrings,
         temperature: temperature,
-        top_p: db.top_p,
+        ...(presencePenalty === undefined ? {} : { presence_penalty: presencePenalty }),
+        ...(frequencyPenalty === undefined ? {} : { frequency_penalty: frequencyPenalty }),
+        ...(topP === undefined ? {} : { top_p: topP }),
     }
 
     const url = new URL(db.textgenWebUIBlockingURL)
@@ -1632,7 +1645,7 @@ async function requestPlugin(arg:RequestDataArgumentExtended):Promise<requestDat
     const model = isV3Model ? arg.aiModel.replace('pluginmodel:::', '') : db.currentPluginProvider
     const providerOptions = pluginV2.providerOptions.get(model)
     const reportStatus = statusEnabled(arg.realChatId)
-        && resolvePluginRequestStatus(providerOptions)
+        && await resolvePluginRequestStatus(providerOptions)
     const genId = arg.chatId ?? `aux-${uuidv4()}`
     let injectionManifest: RequestInjectionManifest | undefined
 
@@ -1743,33 +1756,49 @@ async function requestPlugin(arg:RequestDataArgumentExtended):Promise<requestDat
             modelId: arg.aiModel,
             temperatureOverride: arg.temperature,
         }) as PluginV2ProviderArgument
+        const legacyPluginTemperature = arg.temperature === undefined
+            ? resolveStoredTemperature(db.temperature)
+            : resolveApiSamplingParameter('temperature', arg.temperature)
+        const legacyPluginPresencePenalty = resolveStoredSamplingParameter('presence_penalty', db.PresensePenalty)
+        const legacyPluginFrequencyPenalty = resolveStoredSamplingParameter('frequency_penalty', db.frequencyPenalty)
+        const providerTimeoutMs = Number.isFinite(db.localNetworkTimeoutSec)
+            && db.localNetworkTimeoutSec > 0
+            ? db.localNetworkTimeoutSec * 1000
+            : 600_000
+        const providerDeadlineAt = startedAt + providerTimeoutMs
+        const runProvider = <T>(invoke: (signal: AbortSignal) => Promise<T>) =>
+            runPluginProviderWithTimeout(
+                invoke,
+                Math.max(1, providerDeadlineAt - Date.now()),
+                arg.abortSignal,
+            )
         let d = v2Function
-            ? await v2Function(pluginArguments, arg.abortSignal)
-            : await pluginProcess({
+            ? await runProvider(signal => v2Function(pluginArguments, signal))
+            : await runProvider(() => pluginProcess({
                 bias: bias,
                 prompt_chat: formated,
-                temperature: arg.temperature ?? (db.temperature / 100),
                 max_tokens: maxTokens,
-                presence_penalty: (db.PresensePenalty / 100),
-                frequency_penalty: (db.frequencyPenalty / 100)
-            })
+                ...(legacyPluginTemperature === undefined ? {} : { temperature: legacyPluginTemperature }),
+                ...(legacyPluginPresencePenalty === undefined ? {} : { presence_penalty: legacyPluginPresencePenalty }),
+                ...(legacyPluginFrequencyPenalty === undefined ? {} : { frequency_penalty: legacyPluginFrequencyPenalty }),
+            }))
         if(v2Function && nativeStructuredOutput){
-            d = await normalizePluginStructuredOutputFailure(d)
+            d = await runProvider(() => normalizePluginStructuredOutputFailure(d))
             if(isPluginStructuredOutputValidationFailure(d)){
-                d = await v2Function({
+                d = await runProvider(signal => v2Function({
                     ...pluginArguments,
                     prompt_chat: [
                         ...pluginArguments.prompt_chat,
                         { role: 'user', content: pluginStructuredOutputRepairMessage },
                     ],
-                }, arg.abortSignal)
-                d = await normalizePluginStructuredOutputFailure(d)
+                }, signal))
+                d = await runProvider(() => normalizePluginStructuredOutputFailure(d))
             }
             if(shouldFallbackFromNativeStructuredOutput(d)){
-                d = await v2Function({
+                d = await runProvider(signal => v2Function({
                     ...pluginArguments,
                     response_schema: undefined,
-                }, arg.abortSignal)
+                }, signal))
             }
         }
     
@@ -1789,7 +1818,9 @@ async function requestPlugin(arg:RequestDataArgumentExtended):Promise<requestDat
             }
         }
         else if(!d.success){
-            const errorText = d.content instanceof ReadableStream ? await (new Response(d.content)).text() : d.content
+            const errorText = d.content instanceof ReadableStream
+                ? await runProvider(() => (new Response(d.content)).text())
+                : d.content
             if(reportStatus) safeStatus(() => endStatus(genId, 'failed', {
                 now: Date.now(), error: String(errorText),
             }))
@@ -1807,11 +1838,16 @@ async function requestPlugin(arg:RequestDataArgumentExtended):Promise<requestDat
         else if(d.content instanceof ReadableStream){
             const reader = d.content.getReader()
             let fullText = ''
+            let terminalStreamError: unknown
             const statusStream = new ReadableStream<StreamResponseChunk>({
                 async pull(controller) {
                     try {
                         const { done, value } = await reader.read()
                         if(done){
+                            if(terminalStreamError){
+                                controller.error(terminalStreamError)
+                                return
+                            }
                             if(reportStatus) safeStatus(() => endStatus(genId, 'done', { now: Date.now() }))
                             await evidenceRecorder.finish({
                                 success: true,
@@ -1851,7 +1887,14 @@ async function requestPlugin(arg:RequestDataArgumentExtended):Promise<requestDat
             })
 
             if(arg.useStreaming === false){
-                const text = await collectStreamingText(statusStream)
+                let text: string
+                try {
+                    text = await runProvider(() => collectStreamingText(statusStream))
+                } catch (error) {
+                    terminalStreamError = error
+                    await reader.cancel(error).catch(() => {})
+                    throw error
+                }
                 return {
                     type: 'success',
                     result: text,
@@ -2080,7 +2123,10 @@ async function requestOllama(arg:RequestDataArgumentExtended):Promise<requestDat
         }
     }
 
-    const ollama = new Ollama({host: db.ollamaURL})
+    const ollama = new Ollama({
+        host: db.ollamaURL,
+        fetch: createOllamaFetch(fetch, arg.abortSignal),
+    })
 
     const messages = []
     for (const v of formated) {
@@ -2092,20 +2138,46 @@ async function requestOllama(arg:RequestDataArgumentExtended):Promise<requestDat
         }
     }
 
-    const response = await ollama.chat({
+    arg.abortSignal?.throwIfAborted()
+    const request = buildOllamaChatRequest({
         model: db.ollamaModel,
-        messages: messages,
-        stream: true
+        messages,
+        useStreaming: arg.useStreaming !== false,
+        schema: arg.schema,
+        temperature: arg.temperature,
+        maxTokens: arg.maxTokens,
     })
+
+    if (arg.useStreaming === false) {
+        const response = await ollama.chat({ ...request, stream: false })
+        return {
+            type: 'success',
+            result: response.message.content,
+            finishReason: response.done_reason,
+        }
+    }
+
+    const response = await ollama.chat({ ...request, stream: true })
+    arg.abortSignal?.throwIfAborted()
 
     const readableStream = new ReadableStream<StreamResponseChunk>({
         async start(controller){
-            for await(const chunk of response){
-                controller.enqueue({
-                    "0": chunk.message.content
-                })
+            const abort = () => ollama.abort()
+            arg.abortSignal?.addEventListener('abort', abort, { once: true })
+            try {
+                for await(const chunk of response){
+                    controller.enqueue({
+                        "0": chunk.message.content
+                    })
+                }
+                controller.close()
             }
-            controller.close()
+            catch (error) {
+                controller.error(error)
+            }
+            finally {
+                arg.abortSignal?.removeEventListener('abort', abort)
+            }
         }
     })
 
@@ -2266,6 +2338,11 @@ async function requestHorde(arg:RequestDataArgumentExtended):Promise<requestData
     const prompt = applyChatTemplate(formated)
 
     const realModel = aiModel.split(":::")[1]
+    const hordeTemperature = arg.temperature === undefined
+        ? resolveStoredTemperature(db.temperature)
+        : resolveApiSamplingParameter('temperature', arg.temperature)
+    const hordeTopK = resolveStoredSamplingParameter('top_k', db.top_k)
+    const hordeTopP = resolveStoredSamplingParameter('top_p', db.top_p)
 
     const argument = {
         "prompt": prompt,
@@ -2274,9 +2351,9 @@ async function requestHorde(arg:RequestDataArgumentExtended):Promise<requestData
             "max_context_length": db.maxContext + 100,
             "max_length": db.maxResponse,
             "singleline": false,
-            "temperature": db.temperature / 100,
-            "top_k": db.top_k,
-            "top_p": db.top_p,
+            ...(hordeTemperature === undefined ? {} : { "temperature": hordeTemperature }),
+            ...(hordeTopK === undefined ? {} : { "top_k": hordeTopK }),
+            ...(hordeTopP === undefined ? {} : { "top_p": hordeTopP }),
         },
         "trusted_workers": false,
         "workerslow_workers": true,

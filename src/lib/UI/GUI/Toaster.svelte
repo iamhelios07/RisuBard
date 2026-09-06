@@ -30,12 +30,6 @@
 />
 
 <style>
-    :global([data-sonner-toaster]) {
-        /* Alert dialogs use 2147483600 and top-tier blockers use 2147483640.
-           Keep live request evidence readable above ordinary dialogs without
-           piercing confirmations and loading blockers. */
-        z-index: 2147483620 !important;
-    }
     :global(.risu-toast) {
         border-radius: 0.375rem;
         font-size: 0.875rem;

@@ -7,7 +7,6 @@
     import RealmPopUp from './lib/UI/Realm/RealmPopUp.svelte';
     import GridChars from './lib/Others/GridCatalog.svelte';
     import BookmarkList from './lib/Others/BookmarkList.svelte';
-    import Settings from './lib/Setting/Settings.svelte';
     import { showRealmInfoStore, importCharacterProcess } from './ts/characterCards';
     import { importPreset, getDatabase, setDatabase } from './ts/storage/database.svelte';
     import { readModule } from './ts/process/modules';
@@ -41,15 +40,17 @@
     import RequestStatusToaster from './lib/UI/GUI/RequestStatusToaster.svelte';
     import sendSound from './etc/send.mp3'
     import { RISU_APP_INTERNAL_DRAG_TYPE, RISU_SIDEBAR_DRAG_TYPE } from './ts/dragTypes';
-    import { onMount } from 'svelte';
-    import { observeModalLayers } from './lib/UI/GUI/modalLayerStack';
 
     let gridOpen = $state(false)
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
     let aprilFoolsPage = $state(0)
     let keepingSessionAlive = $state(false)
+    let settingsComponentPromise: Promise<typeof import('./lib/Setting/Settings.svelte')> | undefined
 
-    onMount(() => observeModalLayers(document.body))
+    function loadSettings() {
+        settingsComponentPromise ??= import('./lib/Setting/Settings.svelte')
+        return settingsComponentPromise
+    }
 
     const getMainDropEffect = (e:DragEvent): DataTransfer['dropEffect'] => {
         const types = Array.from(e.dataTransfer?.types ?? [])
@@ -210,7 +211,14 @@
             <span class="text-sm mt-2 text-textcolor2">{LoadingStatusState.text}</span>
         </div>
     {:else if $settingsOpen}
-        <Settings />
+        {#await loadSettings()}
+            <div class="w-full h-full flex justify-center items-center text-textcolor bg-darkbg">
+                <span>Loading...</span>
+            </div>
+        {:then settingsModule}
+            {@const Settings = settingsModule.default}
+            <Settings />
+        {/await}
     {:else if $MobileGUI}
         <div class="w-full h-full flex flex-col">
             <MobileHeader />

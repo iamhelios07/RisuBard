@@ -62,6 +62,8 @@ import {
     type RequestInjectionSource,
 } from '../status/requestStatus';
 import {
+    beginBardChatUndo,
+    finalizeBardChatUndo,
     loadNarrativeMemoryWiki,
     retractWikiEvent,
     saveManualWikiDocument,
@@ -84,7 +86,10 @@ import {
     resolveWikiPromptPreset,
 } from '../risubard/wikiPromptPreset';
 import { resolveRisuBardChatSettings } from '../risubard/risuBardSettings';
-import { findHistoricalSourceMatches } from '../risubard/historicalSourceRecall';
+import {
+    findHistoricalSourceMatches,
+    resolveHistoricalSourceMatchesById,
+} from '../risubard/historicalSourceRecall';
 import { normalizeArcPlotterRuntimeSettings } from '../risubard/arcPlotterSettings';
 import {
     canonicalTurnNeedsRetry,
@@ -257,6 +262,8 @@ async function confirmProjectedNarrativeTurn(input: {
             canonicalTargetLimit: settings.risuBardCanonicalTargetLimit,
             inquiryTokenBudget: {
                 target: settings.risuBardInquiryTargetTokenBudget,
+                events: settings.risuBardInquiryEventTokenBudget,
+                perSource: settings.risuBardInquirySourceTokenBudget,
                 maximum: settings.risuBardInquiryMaximumTokenBudget,
             },
             canonicalWritingStyle: settings.risuBardCanonicalWritingStyle,
@@ -606,6 +613,8 @@ async function runWikiReboot(
                 canonicalTargetLimit: settings.risuBardCanonicalTargetLimit,
                 inquiryTokenBudget: {
                     target: settings.risuBardInquiryTargetTokenBudget,
+                    events: settings.risuBardInquiryEventTokenBudget,
+                    perSource: settings.risuBardInquirySourceTokenBudget,
                     maximum: settings.risuBardInquiryMaximumTokenBudget,
                 },
                 canonicalWritingStyle: settings.risuBardCanonicalWritingStyle,
@@ -650,14 +659,22 @@ async function runWikiReboot(
             }
             return true
         }
+        const reason = (error instanceof Error
+            ? error.message
+            : String(error)).trim().slice(0, 512) || '알 수 없는 오류'
         if (job) {
             job.status = 'failed'
-            job.lastError = (error instanceof Error
-                ? error.message
-                : String(error)).trim().slice(0, 512)
+            job.lastError = reason
             job.updatedAt = Date.now()
             await persistWikiReboot(character, chat, chatIndex).catch(() => {})
         }
+        publishRisuBardMemoryActivity({
+            characterId: character.chaId,
+            chatId,
+            operation: 'error',
+            timestamp: Date.now(),
+            message: `위키 리부트 실패: ${reason}`,
+        })
         throw error
     }
     finally {
@@ -841,6 +858,7 @@ export async function executeCurrentNarrativeWikiCommand(
     })
     const generationOperation = `command:${characterId}:${chatId}`
     const generationSignal = beginWikiGeneration(generationOperation)
+    let undoStarted = false
     try {
         const result = await executeDirectWikiCommand({
             instruction,
@@ -858,6 +876,12 @@ export async function executeCurrentNarrativeWikiCommand(
                 settings.risuBardModelMode,
                 generationSignal
             ),
+            beforeApply: async () => {
+                await beginBardChatUndo({
+                    characterId, chatId, fetchImpl: fetch, createAuth,
+                })
+                undoStarted = true
+            },
             saveDocument: (document) => saveManualWikiDocument({
                 characterId,
                 chatId,
@@ -881,6 +905,12 @@ export async function executeCurrentNarrativeWikiCommand(
                 createAuth,
             }),
         })
+        if (undoStarted) {
+            await finalizeBardChatUndo({
+                characterId, chatId, fetchImpl: fetch, createAuth,
+            })
+            undoStarted = false
+        }
         announceRisuBardMemoryUpdated({ characterId, chatId })
         publishRisuBardMemoryActivity({
             characterId,
@@ -906,6 +936,17 @@ export async function executeCurrentNarrativeWikiCommand(
         return result
     }
     catch (cause) {
+        if (undoStarted) {
+            try {
+                await finalizeBardChatUndo({
+                    characterId, chatId, fetchImpl: fetch, createAuth,
+                })
+            }
+            catch {
+                // Preserve the original command failure.
+            }
+            undoStarted = false
+        }
         if (generationSignal.aborted) {
             publishRisuBardMemoryActivity({
                 characterId,
@@ -977,7 +1018,11 @@ function syncRequestStatusSource(message: OpenAIChat): void {
     }
 }
 
-function narrativeSourceDisplayName(sourceId: string): string {
+function narrativeSourceDisplayName(
+    sourceId: string,
+    displayName?: string
+): string {
+    if (displayName?.trim()) return displayName
     const wikiMarker = ':wiki:'
     const wikiAt = sourceId.indexOf(wikiMarker)
     if (wikiAt >= 0) return sourceId.slice(wikiAt + wikiMarker.length)
@@ -1478,8 +1523,11 @@ export async function sendChat(chatProcessIndex = -1,arg:{
                         characterId: currentChar.chaId,
                         chatId: narrativeSessionChatId,
                         currentInput,
+                        entityHints: lorepmt.bardWikiEntityHints,
                         tokenBudget: {
                             target: inquirySettings.risuBardInquiryTargetTokenBudget,
+                            events: inquirySettings.risuBardInquiryEventTokenBudget,
+                            perSource: inquirySettings.risuBardInquirySourceTokenBudget,
                             maximum: inquirySettings.risuBardInquiryMaximumTokenBudget,
                         },
                         sourceMatches: findHistoricalSourceMatches({
@@ -1488,7 +1536,21 @@ export async function sendChat(chatProcessIndex = -1,arg:{
                             excludeRecentMessages: normalizeNarrativeWorkingMessageLimit(
                                 inquirySettings.risuBardResponseMessageCount
                             ),
+                            maximumMatches:
+                                inquirySettings.risuBardHistoricalSourceMatchLimit,
                         }),
+                        sourceLimit:
+                            inquirySettings.risuBardHistoricalSourceMatchLimit,
+                        resolveSourceMatches: (messageIds) =>
+                            resolveHistoricalSourceMatchesById({
+                                messageIds,
+                                messages: currentChat.message,
+                                currentInput,
+                                excludeRecentMessages:
+                                    normalizeNarrativeWorkingMessageLimit(
+                                        inquirySettings.risuBardResponseMessageCount
+                                    ),
+                            }),
                         fetchImpl: fetch,
                         createAuth: () => forageStorage.createAuth(),
                     })
@@ -1573,7 +1635,10 @@ export async function sendChat(chatProcessIndex = -1,arg:{
                 )) {
                     requestStatusSources.push({
                         kind: source.id.includes(':wiki:') ? 'wiki' : 'memory',
-                        name: narrativeSourceDisplayName(source.id),
+                        name: narrativeSourceDisplayName(
+                            source.id,
+                            source.displayName
+                        ),
                         role: 'system',
                         content: source.content,
                     })

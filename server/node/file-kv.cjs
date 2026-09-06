@@ -198,6 +198,12 @@ function createFileKv(options = {}) {
         if (entries.length) saveManifest();
     }
 
+    async function kvSetManyAsync(entries) {
+        const prepared = await prepareEntriesAsync(entries);
+        for (const [key, entry] of prepared) manifest.entries[key] = entry;
+        if (entries.length) saveManifest();
+    }
+
     function kvReplacePrefixes(entries, prefixes) {
         const next = { ...manifest.entries };
         for (const key of Object.keys(next)) {
@@ -245,6 +251,20 @@ function createFileKv(options = {}) {
         if (!(key in manifest.entries)) return;
         delete manifest.entries[key];
         saveManifest();
+    }
+
+    function kvDelMany(keys) {
+        let count = 0;
+        let bytes = 0;
+        for (const key of new Set(keys)) {
+            const entry = manifest.entries[key];
+            if (!entry) continue;
+            bytes += entry.size ?? 0;
+            delete manifest.entries[key];
+            count += 1;
+        }
+        if (count > 0) saveManifest();
+        return { count, bytes };
     }
 
     function kvSize(key) {
@@ -364,12 +384,14 @@ function createFileKv(options = {}) {
         kvGet,
         kvSet,
         kvSetMany,
+        kvSetManyAsync,
         kvReplacePrefixes,
         kvReplacePrefixesAsync,
         kvReplacePrefixesFromFilesAsync,
         kvReplaceAll,
         kvReplaceAllAsync,
         kvDel,
+        kvDelMany,
         kvSize,
         kvGetUpdatedAt,
         kvCopyValue,

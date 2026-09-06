@@ -1,5 +1,6 @@
 <script lang="ts">
     import markdownit from 'markdown-it'
+    import { resolveWikiLinkTarget, wikiLinkPlugin } from 'src/ts/risubard/wikiLink'
     import {
         FileIcon,
         FileLock2Icon,
@@ -49,13 +50,16 @@
         onSelected?: (documentId: string) => void
         onFocusModeChange?: (focused: boolean) => void
         onNavigateSource?: (source: StorySourceRef) => void
+        highlightedDocumentIds?: string[] | null
     }
 
     let {
         characterId,
         chatId,
         documents,
-        health = { danglingLinks: [], unlinkedDocumentIds: [] },
+        health = {
+            danglingLinks: [], unlinkedDocumentIds: [], duplicatePassages: [],
+        },
         locked = false,
         mobileLayout = false,
         selectedId = $bindable(''),
@@ -63,6 +67,7 @@
         onSelected,
         onFocusModeChange,
         onNavigateSource,
+        highlightedDocumentIds = null,
     }: Props = $props()
     let creating = $state(false)
     let type = $state<MarkdownWikiDocumentType>('character')
@@ -85,22 +90,60 @@
     let treeExpanded = $state(false)
     let editorExpanded = $state(true)
     let editorFocus = $state(false)
-    let markdownPreview = $state(false)
+    let markdownPreview = $state(
+        DBState.db.risuBardWikiMarkdownPreview === true
+    )
     let treeHeight = $state(normalizeMemoryWikiTreeHeight(undefined))
     let restoredTreeExpanded = false
     let restoredEditorExpanded = true
 
-    const markdownRenderer = markdownit({
-        html: false,
-        breaks: false,
-        linkify: false,
-        typographer: true,
+    function setMarkdownPreview(event: Event) {
+        markdownPreview = (event.currentTarget as HTMLInputElement).checked
+        DBState.db.risuBardWikiMarkdownPreview = markdownPreview
+    }
+
+    // Rebuilt when documents change so the plugin can flag links whose target
+    // no longer exists.
+    let markdownRenderer = $derived.by(() => {
+        const renderer = markdownit({
+            html: false,
+            breaks: false,
+            linkify: false,
+            typographer: true,
+        })
+        renderer.use(wikiLinkPlugin, {
+            resolves: (target: string) =>
+                resolveWikiLinkTarget(target, documents) !== null,
+        })
+        return renderer
     })
 
+    // Rendered markdown is injected as HTML, so its links cannot carry Svelte
+    // handlers; the preview container delegates for them instead.
+    function activateWikiLink(event: Event) {
+        const anchor = (event.target as HTMLElement | null)
+            ?.closest?.('[data-wikilink]')
+        if (!anchor) return
+        event.preventDefault()
+        const target = anchor.getAttribute('data-wikilink') ?? ''
+        const document = resolveWikiLinkTarget(target, documents)
+        if (document) selectDocument(document)
+    }
+
+    function onWikiLinkKeydown(event: KeyboardEvent) {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        activateWikiLink(event)
+    }
+
     let tree = $derived(buildWikiFileTree(documents))
-    let recentlyUpdatedIds = $derived(getRecentlyUpdatedWikiDocumentIds(documents))
+    let recentlyUpdatedIds = $derived(highlightedDocumentIds === null
+        ? getRecentlyUpdatedWikiDocumentIds(documents)
+        : new Set(highlightedDocumentIds))
     let danglingSourceIds = $derived(new Set(
         health.danglingLinks.map((link) => link.sourceId)
+    ))
+    let duplicateDocumentIds = $derived(new Set(
+        (health.duplicatePassages ?? []).flatMap((passage) => passage.documentIds)
     ))
     let selected = $derived(
         documents.find((document) => document.id === selectedId) ?? null
@@ -527,6 +570,7 @@
             <span>{documents.length} 문서</span>
             <span>끊어진 링크 {health.danglingLinks.length}</span>
             <span>연결 없음 {health.unlinkedDocumentIds.length}</span>
+            <span>본문 중복 {health.duplicatePassages?.length ?? 0}</span>
         </div>
         {#each tree as node (node.path)}
             {#if node.kind === 'folder'}
@@ -542,7 +586,9 @@
                                 <div
                                     class="file-row"
                                     class:dangling-link={danglingSourceIds.has(child.documentId)}
+                                    class:duplicate-passage={duplicateDocumentIds.has(child.documentId)}
                                     data-wiki-dangling-document={danglingSourceIds.has(child.documentId) ? child.documentId : undefined}
+                                    data-wiki-duplicate-document={duplicateDocumentIds.has(child.documentId) ? child.documentId : undefined}
                                 >
                                     <button
                                         type="button"
@@ -569,7 +615,9 @@
                 <div
                     class="file-row"
                     class:dangling-link={danglingSourceIds.has(node.documentId)}
+                    class:duplicate-passage={duplicateDocumentIds.has(node.documentId)}
                     data-wiki-dangling-document={danglingSourceIds.has(node.documentId) ? node.documentId : undefined}
+                    data-wiki-duplicate-document={duplicateDocumentIds.has(node.documentId) ? node.documentId : undefined}
                 >
                     <button
                         type="button"
@@ -643,6 +691,7 @@
                         <option value="character">캐릭터</option>
                         <option value="location">장소</option>
                         <option value="faction">세력</option>
+                        <option value="creature">종족·생물</option>
                         <option value="item">사물</option>
                         <option value="concept">개념</option>
                         <option value="scene">현재 장면</option>
@@ -705,7 +754,8 @@
                 <label class="markdown-preview-toggle" title="마크다운 미리보기">
                     <input
                         type="checkbox"
-                        bind:checked={markdownPreview}
+                        checked={markdownPreview}
+                        onchange={setMarkdownPreview}
                         aria-label="마크다운 미리보기"
                         data-wiki-markdown-toggle
                     />
@@ -722,7 +772,15 @@
             </div>
         {/if}
         {#if markdownPreview}
-            <article class="markdown-preview" data-wiki-markdown-preview>
+            <!-- Delegated because injected HTML cannot carry Svelte handlers.
+                 The links themselves are focusable and key-activated. -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <article
+                class="markdown-preview"
+                data-wiki-markdown-preview
+                onclick={activateWikiLink}
+                onkeydown={onWikiLinkKeydown}
+            >
                 {@html markdownRenderer.render(markdown)}
             </article>
         {:else}
@@ -790,6 +848,7 @@
     .root-file:hover, .folder-children .file-select:hover, button.active { background: color-mix(in srgb, var(--risu-theme-primary) 13%, transparent); }
     .file-row.dangling-link { background: color-mix(in srgb, var(--risu-theme-draculared) 10%, transparent); }
     .file-row.dangling-link .file-select { color: var(--risu-theme-draculared); }
+    .file-row.duplicate-passage { box-shadow: inset 2px 0 color-mix(in srgb, var(--color-warning) 75%, transparent); }
     .document-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .recent-update-badge { flex: 0 0 auto; margin-left: auto; padding: .12rem .32rem; border: 1px solid color-mix(in srgb, var(--risu-theme-primary) 45%, transparent); border-radius: .25rem; color: var(--risu-theme-textcolor); background: color-mix(in srgb, var(--risu-theme-primary) 18%, transparent); font-size: .6rem; font-weight: 700; line-height: 1.2; white-space: nowrap; }
     .editor-pane { container-name: wiki-editor-pane; container-type: inline-size; min-width: 0; display: flex; flex-direction: column; background: color-mix(in srgb, var(--risu-theme-darkbg) 98%, var(--color-bgcolor)); }
@@ -815,6 +874,10 @@
     .markdown-editor:focus { box-shadow: inset 3px 0 color-mix(in srgb, var(--risu-theme-primary) 60%, transparent); }
     .markdown-editor[readonly] { opacity: .86; }
     .markdown-preview { flex: 1; min-height: 20rem; margin: 0; overflow-x: auto; overflow-y: scroll; padding: 1rem 1.15rem 2rem; border-top: 1px solid color-mix(in srgb, var(--risu-theme-darkborderc) 60%, transparent); color: var(--risu-theme-textcolor); font-size: .82rem; line-height: 1.7; scrollbar-gutter: stable; scrollbar-width: thin; }
+    .markdown-preview :global(.wikilink) { color: var(--risu-theme-primary); text-decoration: underline; text-underline-offset: .15em; cursor: pointer; }
+    .markdown-preview :global(.wikilink:hover) { filter: brightness(1.2); }
+    .markdown-preview :global(.wikilink:focus-visible) { outline: 2px solid var(--risu-theme-primary); outline-offset: 2px; border-radius: .12rem; }
+    .markdown-preview :global(.wikilink-unresolved) { color: var(--risu-theme-textcolor2); text-decoration-style: dashed; cursor: default; }
     .markdown-preview :global(h1), .markdown-preview :global(h2), .markdown-preview :global(h3), .markdown-preview :global(h4) { margin: 1.2em 0 .5em; color: var(--risu-theme-textcolor); line-height: 1.3; }
     .markdown-preview :global(h1:first-child), .markdown-preview :global(h2:first-child), .markdown-preview :global(h3:first-child) { margin-top: 0; }
     .markdown-preview :global(h1) { font-size: 1.35rem; }

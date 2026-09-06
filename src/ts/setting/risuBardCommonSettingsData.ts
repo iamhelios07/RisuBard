@@ -1,5 +1,6 @@
 import type { SettingItem } from './types'
 import { normalizeRisuBardCanonicalCustomStyle } from '../risubard/risuBardSettings'
+import { wikiWritingLanguageOptions } from '../risubard/wikiWritingLanguage'
 import { normalizeArcaChatTitleImageStyle } from '../arcaChatSaverSettings'
 import {
     ARC_PLOTTER_CUSTOM_SELECTION_ID,
@@ -75,6 +76,15 @@ export const risuBardCommonSettingsItems: SettingItem[] = [
         keywords: ['inquiry', 'target', 'token', '검색', '목표', '토큰'],
     },
     {
+        id: 'risubard.chat.inquiryEventTokenBudget',
+        type: 'number',
+        labelKey: 'risuBardInquiryEventTokenBudget',
+        helpKey: 'risuBardInquiryEventTokenBudget',
+        bindKey: 'risuBardInquiryEventTokenBudget',
+        options: { min: 256, step: 256 },
+        keywords: ['inquiry', 'event', 'token', '검색', '사건', '토큰'],
+    },
+    {
         id: 'risubard.chat.inquiryMaximumTokenBudget',
         type: 'number',
         labelKey: 'risuBardInquiryMaximumTokenBudget',
@@ -82,6 +92,24 @@ export const risuBardCommonSettingsItems: SettingItem[] = [
         bindKey: 'risuBardInquiryMaximumTokenBudget',
         options: { min: 256, step: 256 },
         keywords: ['inquiry', 'maximum', 'token', '검색', '상한', '토큰'],
+    },
+    {
+        id: 'risubard.chat.inquirySourceTokenBudget',
+        type: 'number',
+        labelKey: 'risuBardInquirySourceTokenBudget',
+        helpKey: 'risuBardInquirySourceTokenBudget',
+        bindKey: 'risuBardInquirySourceTokenBudget',
+        options: { min: 256, step: 256 },
+        keywords: ['inquiry', 'source', 'token', '검색', '자료', '토큰'],
+    },
+    {
+        id: 'risubard.chat.historicalSourceMatchLimit',
+        type: 'number',
+        labelKey: 'risuBardHistoricalSourceMatchLimit',
+        helpKey: 'risuBardHistoricalSourceMatchLimit',
+        bindKey: 'risuBardHistoricalSourceMatchLimit',
+        options: { min: 0, max: 32, step: 1 },
+        keywords: ['historical', 'source', 'candidate', '과거', '원문', '후보'],
     },
     {
         id: 'risubard.chat.analysisTokenLimit',
@@ -216,10 +244,7 @@ export const risuBardCommonSettingsItems: SettingItem[] = [
         labelKey: 'risuBardWikiWritingLanguage',
         helpKey: 'risuBardWikiWritingLanguage',
         bindKey: 'risuBardWikiWritingLanguage',
-        options: { selectOptions: [
-            { value: 'ko', label: '한국어' },
-            { value: 'en', label: 'English' },
-        ] },
+        options: { selectOptions: wikiWritingLanguageOptions },
         keywords: ['wiki', 'language', 'English', '위키', '언어', '영어'],
     },
     {

@@ -3,7 +3,15 @@ import type {
     NarrativeMemoryState,
 } from '../../packages/risubard-core/src/memoryDelta'
 import { get_encoding, type Tiktoken } from '@dqbd/tiktoken'
-import { ModelOutputError, modelOutputRepairInstruction, readModelResponseText, runValidatedModelRequest, type ModelResponse } from '../../packages/risubard-core/src/modelResponse'
+import {
+    ModelOutputError,
+    modelOutputRepairInstruction,
+    readModelResponseText,
+    runStructuredModelRequest,
+    runValidatedModelRequest,
+    type ModelResponse,
+    type StructuredOutputMode,
+} from '../../packages/risubard-core/src/modelResponse'
 import {
     validateMemoryDelta,
 } from '../../packages/risubard-core/src/memoryDelta'
@@ -30,7 +38,6 @@ import {
 import {
     buildMemoryWriterSystemPrompt,
     buildCanonicalBatchSchema,
-    buildCanonicalSingleSchema,
     hasMemoryWriterContent,
     parseCanonicalBatch,
     parseCanonicalSingle,
@@ -54,7 +61,11 @@ import {
     normalizeRisuBardInquiryTokenBudget,
     type RisuBardCanonicalWritingStyle,
 } from '../../src/ts/risubard/risuBardSettings'
-import { normalizeWikiWritingLanguage, type WikiWritingLanguage } from '../../src/ts/risubard/wikiWritingLanguage'
+import {
+    normalizeWikiWritingLanguage,
+    wikiWritingHeadings,
+    type WikiWritingLanguage,
+} from '../../src/ts/risubard/wikiWritingLanguage'
 import {
     normalizeArcPlotterRuntimeSettings,
     type ArcPlotterRuntimeSettings,
@@ -65,7 +76,7 @@ import {
 } from './risubard-markdown-excerpt'
 import {
     applyCanonicalSectionPatches,
-    hasCanonicalSection,
+    parseCanonicalSectionPatchMarkdown,
 } from './risubard-markdown-section-patch'
 import {
     STORY_ARC_EVENT_EXCERPT_CHARACTERS,
@@ -83,10 +94,6 @@ const CHARACTER_CURRENT_STATE_HEADINGS = ['현재 상태', 'Current State'] as c
 const CHARACTER_OVERVIEW_HEADINGS = new Set([
     '개요', 'overview', '프로필', 'profile', '인물 정보', 'character profile',
 ])
-
-function hasCharacterCurrentState(markdown: string): boolean {
-    return hasCanonicalSection(markdown, CHARACTER_CURRENT_STATE_HEADINGS)
-}
 
 function normalizeNewCharacterCurrentState(
     patches: CanonicalSectionPatch[],
@@ -107,7 +114,9 @@ function normalizeNewCharacterCurrentState(
     if (overviewIndex < 0) return patches
     return patches.map((patch, index) => index === overviewIndex ? {
         ...patch,
-        heading: language === 'en' ? 'Current State' : '현재 상태',
+        heading: wikiWritingHeadings[
+            normalizeWikiWritingLanguage(language)
+        ].currentState,
     } : patch)
 }
 
@@ -156,6 +165,8 @@ export interface MemoryAnalysisInput {
     canonicalTargetLimit?: number
     inquiryTokenBudget?: {
         target: number
+        events?: number
+        perSource?: number
         maximum: number
     }
     canonicalWritingStyle?: RisuBardCanonicalWritingStyle
@@ -180,6 +191,7 @@ export interface MemoryAnalysisModelRequest {
     schemaVersion?: 1 | 2
     format?: 'markdown' | 'memory-draft' | 'reboot-batch' | 'canonical-batch'
     responseSchema?: string
+    structuredOutputMode?: StructuredOutputMode
     inputTokenLimit?: number
     /** Stable owning chat for body-free request evidence. */
     sessionChatId?: string
@@ -239,6 +251,7 @@ export interface NarrativeMarkdownWikiWriteService {
         currentInput: string
         tokenBudget?: {
             target: number
+            events?: number
             maximum: number
         }
     }): Promise<{
@@ -613,7 +626,9 @@ function snapshotInput(value: MemoryAnalysisInput): MemoryAnalysisInput {
         ...(value.inquiryTokenBudget === undefined ? {} : {
             inquiryTokenBudget: normalizeRisuBardInquiryTokenBudget(
                 value.inquiryTokenBudget.target,
-                value.inquiryTokenBudget.maximum
+                value.inquiryTokenBudget.maximum,
+                value.inquiryTokenBudget.events,
+                value.inquiryTokenBudget.perSource,
             ),
         }),
         canonicalWritingStyle: normalizeRisuBardCanonicalWritingStyle(
@@ -935,9 +950,9 @@ export function createMemoryAnalysisRunner(
             })
         )
         if (options.nativeV2Analysis && options.markdownWikiService) {
-            const sourceMessageIds = snapshot.messages.map(
-                (message) => message.messageId
-            )
+            const sourceMessageIds = snapshot.rebootTurns
+                ? snapshot.rebootTurns.flatMap((turn) => turn.sourceMessageIds)
+                : snapshot.messages.map((message) => message.messageId)
             const contextMessages = snapshot.contextMessages
                 ?? snapshot.messages
             const excludedDocumentIds = new Set(
@@ -1002,7 +1017,10 @@ export function createMemoryAnalysisRunner(
                     'Include every required shared array even when it is empty.',
                 ].join('\n')
                 : ''
-            const analyzeDraft = async (validationError?: ModelOutputError) => analyzeResponse({
+            const analyzeDraft = async (
+                structuredOutputMode: StructuredOutputMode,
+                validationError?: ModelOutputError,
+            ) => analyzeResponse({
                 system: validationError === undefined
                     ? [
                         memoryWriterSystemPrompt,
@@ -1023,6 +1041,7 @@ export function createMemoryAnalysisRunner(
                 format: snapshot.rebootTurns
                     ? 'reboot-batch' as const
                     : 'memory-draft' as const,
+                structuredOutputMode,
                 ...(snapshot.rebootTurns ? {
                     responseSchema: buildRebootBatchDraftSchema(
                         snapshot.rebootTurns.length as 1 | 2
@@ -1053,24 +1072,25 @@ export function createMemoryAnalysisRunner(
                     } : {}),
                 }),
             })
-            const analyzeParsedDraft = () => runValidatedModelRequest({
-                request: analyzeDraft,
-                parse: (output) => {
-                    if (snapshot.rebootTurns) {
-                        const rebootDraft = parseRebootBatchDraft(
-                            output,
-                            snapshot.rebootTurns.map((turn) =>
-                                turn.assistantMessageId
-                            )
+            const parseAnalyzedDraft = (output: string) => {
+                if (snapshot.rebootTurns) {
+                    const rebootDraft = parseRebootBatchDraft(
+                        output,
+                        snapshot.rebootTurns.map((turn) =>
+                            turn.assistantMessageId
                         )
-                        return {
-                            output,
-                            rebootDraft,
-                            draft: rebootBatchToMemoryDraft(rebootDraft),
-                        }
+                    )
+                    return {
+                        output,
+                        rebootDraft,
+                        draft: rebootBatchToMemoryDraft(rebootDraft),
                     }
-                    return { output, draft: parseMemoryWriterDraft(output) }
                 }
+                return { output, draft: parseMemoryWriterDraft(output) }
+            }
+            const analyzeParsedDraft = () => runStructuredModelRequest({
+                request: analyzeDraft,
+                parse: parseAnalyzedDraft,
             })
             let analyzedDraft = await analyzeParsedDraft()
             let modelOutput = analyzedDraft.output
@@ -1123,13 +1143,6 @@ export function createMemoryAnalysisRunner(
                     ],
                 }
             }
-            const characterStructureRepairs = snapshot.additionalAnalysis
-                ? documents.filter((document) => document.type === 'character'
-                    && !hasCharacterCurrentState(document.content))
-                : []
-            for (const document of characterStructureRepairs) {
-                excludedDocumentIds.delete(document.id)
-            }
             draft = {
                 ...draft,
                 // The runtime owns the reserved map and its checkpoint cadence.
@@ -1137,28 +1150,6 @@ export function createMemoryAnalysisRunner(
                 // on every confirmed turn.
                 canonicalUpdateCandidates: draft.canonicalUpdateCandidates
                     .filter((candidate) => !isStoryArcCandidate(candidate)),
-            }
-            if (characterStructureRepairs.length > 0) {
-                const existingTargets = new Set(draft.canonicalUpdateCandidates
-                    .map((candidate) => candidate.targetDocumentId)
-                    .filter((id): id is string => id !== null))
-                draft = {
-                    ...draft,
-                    canonicalUpdateCandidates: [
-                        ...characterStructureRepairs
-                            .filter((document) => !existingTargets.has(document.id))
-                            .map((document) => ({
-                                type: 'character' as const,
-                                title: document.title,
-                                aliases: document.aliases ?? [],
-                                reason: '필수 현재 상태 절이 없는 기존 캐릭터 정본의 구조를 보완한다.',
-                                action: 'update' as const,
-                                targetDocumentId: document.id,
-                                confidence: 1,
-                            })),
-                        ...draft.canonicalUpdateCandidates,
-                    ],
-                }
             }
             if (!hasMemoryWriterContent(draft)) {
                 if (!snapshot.rebootTurns) return emptyNativeState()
@@ -1328,8 +1319,8 @@ export function createMemoryAnalysisRunner(
                                 'If an existing target has no verified change after checking the evidence, return an empty sections array so the program skips persistence. A new document must contain at least one section.',
                                 'Use semanticUpdate as a structured coverage checklist, but verify every item against confirmedMessages before applying it.',
                                 snapshot.wikiWritingLanguage === 'en'
-                                    ? 'Every character document requires a self-contained `### Current State` section near the top, using only verified current facts. A structure repair may reorganize existing canon without a new fact.'
-                                    : '모든 캐릭터 정본은 문서 상단에 자족적인 `### 현재 상태` 절을 두고, 확인된 현재 사실만 사용한다. 구조 보완은 새 사실 없이 기존 정본을 재구성할 수 있다.',
+                                    ? 'Prefer a compact self-contained `### Current State` section near the top of character documents when verified current facts benefit from a snapshot. Its absence is not a persistence error and never justifies a structure-only rewrite.'
+                                    : '캐릭터의 확인된 현재 사실을 한눈에 볼 필요가 있으면 문서 상단의 간결한 `### 현재 상태` 절을 권장한다. 이 절이 없어도 저장할 수 있으며, 절을 만들기 위한 구조 보완만 수행하지 않는다.',
                                 'Remove superseded facts from current-state sections; retain an old state only as a clearly historical transition when it remains narratively useful.',
                                 'Preserve unrelated established identity facts, relationships, knowledge, goals, possessions, constraints, and unresolved continuity unless confirmedMessages explicitly change them.',
                                 'Apply the stateChanges.after values and relevant persistentFacts, characterKnowledge, and openContinuity to the correct subject document. Do not copy another character\'s facts into this target.',
@@ -1398,19 +1389,21 @@ export function createMemoryAnalysisRunner(
                             ) => runValidatedModelRequest({
                                 maxAttempts,
                                 request: (feedback) => {
-                                    const compactSingle = targets.length === 1
+                                    const markdownFallback = targets.length === 1
                                         && feedback?.reason === 'invalid-structure'
                                     return analyzeResponse({
-                                        format: 'canonical-batch',
-                                        responseSchema: compactSingle
-                                            ? buildCanonicalSingleSchema()
-                                            : buildCanonicalBatchSchema(targets.length),
+                                        format: markdownFallback
+                                            ? 'markdown'
+                                            : 'canonical-batch',
+                                        ...(!markdownFallback ? {
+                                            responseSchema: buildCanonicalBatchSchema(targets.length),
+                                        } : {}),
                                         inputTokenLimit: snapshot.analysisTokenLimit,
                                         system: [
                                             canonicalSystem,
                                             ...(feedback ? [modelOutputRepairInstruction(feedback)] : []),
-                                            ...(compactSingle ? [
-                                                'This retry has exactly one canonical target. Use the smaller supplied schema: return only the `sections` object, without schemaVersion, documents, or candidateIndex.',
+                                            ...(markdownFallback ? [
+                                                'This retry has exactly one canonical target. Return Markdown only: one or more direct `### section` headings followed by each complete replacement body. Do not return JSON, a document title, preamble, commentary, or code fences.',
                                             ] : []),
                                         ].join('\n'),
                                         input: canonicalInput(targets),
@@ -1430,7 +1423,18 @@ export function createMemoryAnalysisRunner(
                                             }
                                         }
                                         catch {
-                                            throw batchError
+                                            try {
+                                                parsed = {
+                                                    schemaVersion: 1,
+                                                    documents: [{
+                                                        candidateIndex: 0,
+                                                        sections: parseCanonicalSectionPatchMarkdown(text),
+                                                    }],
+                                                }
+                                            }
+                                            catch {
+                                                throw batchError
+                                            }
                                         }
                                     }
                                     if (parsed.documents.length !== targets.length) {
@@ -1445,7 +1449,7 @@ export function createMemoryAnalysisRunner(
                                                 snapshot.wikiWritingLanguage,
                                             )
                                         }
-                                        const rewritten = applyCanonicalSectionPatches({
+                                        applyCanonicalSectionPatches({
                                             ...(target.target ? {
                                                 markdown: target.target.content,
                                             } : {}),
@@ -1453,11 +1457,6 @@ export function createMemoryAnalysisRunner(
                                                 ?? target.candidate.title,
                                             patches: document.sections,
                                         })
-                                        if (!hasCharacterCurrentState(rewritten)) {
-                                            throw new Error(snapshot.wikiWritingLanguage === 'en'
-                                                ? 'Every character document must include a direct `### Current State` section.'
-                                                : '모든 캐릭터 정본에는 직접 자식 `### 현재 상태` 절이 필요합니다.')
-                                        }
                                     }
                                     return parsed
                                 },

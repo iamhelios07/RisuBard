@@ -22,7 +22,7 @@
 
   } from "../../ts/stores.svelte";
     import { setDatabase } from "../../ts/storage/database.svelte";
-    import { DBState, SizeStore } from 'src/ts/stores.svelte';
+    import { DBState, MobileSideBar, risuBardGalleryOpen, SizeStore } from 'src/ts/stores.svelte';
     import BarIcon from "./BarIcon.svelte";
     import SidebarIndicator from "./SidebarIndicator.svelte";
     import {
@@ -78,6 +78,11 @@
     reorderCharacterVaultSidebarShortcuts,
   } from "src/ts/characterVault";
   import { getEffectivePersona } from "src/ts/personaScopes";
+  import {
+    findQuickInventoryFolderCard,
+    resolveQuickInventoryCardDrop,
+    type QuickInventoryCardTarget,
+  } from './quickInventoryDrop';
   const isTouchDevice = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches;
   const touchDragEnabled = $derived(isTouchDevice && !DBState.db.disableMobileDragDrop);
     import { RISU_SIDEBAR_DRAG_TYPE } from "src/ts/dragTypes";
@@ -334,7 +339,80 @@
     }
   }
 
+  let desktopDropTarget: HTMLDivElement | null = null
+
+  const avatarDropFeedbackClasses = [
+    'quick-inventory-drop-before',
+    'quick-inventory-drop-after',
+    'quick-inventory-drop-column',
+    'quick-inventory-drop-inside',
+  ]
+
+  const avatarCardTargetFromElement = (target:HTMLElement):QuickInventoryCardTarget => ({
+    kind: target.dataset.dragKind as 'character' | 'folder',
+    id: target.dataset.dragId!,
+    index: parseInt(target.dataset.dragIndex!),
+    folder: target.dataset.dragFolder || undefined,
+    folderLength: parseInt(target.dataset.folderLength ?? '0'),
+  })
+
+  const normalizeAvatarCardTarget = (
+    source:DragData,
+    target:HTMLElement,
+    targetData:QuickInventoryCardTarget
+  ) => {
+    if(source.kind === 'folder' && targetData.folder){
+      const folderCard = findQuickInventoryFolderCard(target)
+      if(folderCard){
+        return {
+          target: folderCard,
+          targetData: avatarCardTargetFromElement(folderCard),
+        }
+      }
+    }
+    return { target, targetData }
+  }
+
+  const resolveAvatarCardDrop = (
+    source:DragData,
+    target:HTMLElement,
+    targetData:QuickInventoryCardTarget,
+    clientX:number,
+    clientY:number
+  ) => {
+    const columns = target.parentElement
+      ? getComputedStyle(target.parentElement).gridTemplateColumns
+        .split(' ')
+        .filter(Boolean)
+        .length
+      : 1
+    return resolveQuickInventoryCardDrop({
+      sourceKind: source.kind,
+      targetKind: targetData.kind,
+      targetId: targetData.id,
+      targetIndex: targetData.index,
+      targetFolder: targetData.folder,
+      targetFolderLength: targetData.folderLength,
+      rect: target.getBoundingClientRect(),
+      columnCount: columns,
+      clientX,
+      clientY,
+    })
+  }
+
+  const clearAvatarDragFeedback = (e?: DragEv) => {
+    if(e?.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)){
+      return
+    }
+    const target = desktopDropTarget ?? e?.currentTarget
+    target?.classList.remove(...avatarDropFeedbackClasses)
+    if(desktopDropTarget === target){
+      desktopDropTarget = null
+    }
+  }
+
   const clearCurrentDrag = () => {
+    clearAvatarDragFeedback()
     currentDrag = null
   }
 
@@ -359,13 +437,58 @@
     return currentDrag
   }
 
-  const avatarDragOver = (e:DragEv) => {
-    if(!getCurrentSidebarDrag(e)){
+  const avatarDragOver = (e:DragEv, targetData:QuickInventoryCardTarget) => {
+    const drag = getCurrentSidebarDrag(e)
+    if(!drag){
+      return
+    }
+    const normalized = normalizeAvatarCardTarget(drag, e.currentTarget, targetData)
+    const resolved = resolveAvatarCardDrop(
+      drag,
+      normalized.target,
+      normalized.targetData,
+      e.clientX,
+      e.clientY
+    )
+    if(!resolved){
       return
     }
     e.preventDefault()
     e.stopPropagation()
     e.dataTransfer.dropEffect = 'move'
+    if(desktopDropTarget !== normalized.target){
+      clearAvatarDragFeedback()
+      desktopDropTarget = normalized.target as HTMLDivElement
+    }
+    normalized.target.classList.remove(...avatarDropFeedbackClasses)
+    if(resolved.mode === 'inside'){
+      normalized.target.classList.add('quick-inventory-drop-inside')
+      return
+    }
+    normalized.target.classList.add(resolved.placement.after
+      ? 'quick-inventory-drop-after'
+      : 'quick-inventory-drop-before')
+    if(resolved.placement.axis === 'column'){
+      normalized.target.classList.add('quick-inventory-drop-column')
+    }
+  }
+
+  const avatarCardDrop = (targetData:QuickInventoryCardTarget, e:DragEv) => {
+    const drag = getCurrentSidebarDrag(e)
+    if(!drag){
+      return
+    }
+    const normalized = normalizeAvatarCardTarget(drag, e.currentTarget, targetData)
+    const resolved = resolveAvatarCardDrop(
+      drag,
+      normalized.target,
+      normalized.targetData,
+      e.clientX,
+      e.clientY
+    )
+    if(resolved){
+      avatarDrop(resolved.drop, e)
+    }
   }
 
   const avatarDrop = (target:DropData, e:DragEv) => {
@@ -455,20 +578,43 @@
     if (touchDragState.ghost) touchDragState.ghost.style.display = ''
 
     if (touchDragState.highlighted) {
-      touchDragState.highlighted.classList.remove('bg-success', 'ring-2', 'ring-success')
+      touchDragState.highlighted.classList.remove(
+        'bg-success',
+        ...avatarDropFeedbackClasses
+      )
       touchDragState.highlighted = null
     }
 
     if (!el) return
     const spacer = el.closest('[data-spacer-index]') as HTMLElement | null
-    const item = el.closest('[data-drag-index]') as HTMLElement | null
+    let item = el.closest('[data-drag-index]') as HTMLElement | null
+    if(touchDragState.data.kind === 'folder' && item?.dataset.dragFolder){
+      item = findQuickInventoryFolderCard(item)
+    }
 
     if (spacer) {
       spacer.classList.add('bg-success')
       touchDragState.highlighted = spacer
     } else if (item && item !== touchDragState.element) {
-      item.classList.add('ring-2', 'ring-success')
-      touchDragState.highlighted = item
+      const resolved = resolveAvatarCardDrop(
+        touchDragState.data,
+        item,
+        avatarCardTargetFromElement(item),
+        touch.clientX,
+        touch.clientY
+      )
+      if(resolved?.mode === 'inside'){
+        item.classList.add('quick-inventory-drop-inside')
+      }
+      else if(resolved){
+        item.classList.add(resolved.placement.after
+          ? 'quick-inventory-drop-after'
+          : 'quick-inventory-drop-before')
+        if(resolved.placement.axis === 'column'){
+          item.classList.add('quick-inventory-drop-column')
+        }
+      }
+      touchDragState.highlighted = resolved ? item : null
     }
   }
 
@@ -477,7 +623,10 @@
     if (!touchDragState) return false
     touchDragState.element.style.opacity = ''
     if (touchDragState.highlighted) {
-      touchDragState.highlighted.classList.remove('bg-success', 'ring-2', 'ring-success')
+      touchDragState.highlighted.classList.remove(
+        'bg-success',
+        ...avatarDropFeedbackClasses
+      )
     }
     if (touchDragState.ghost) touchDragState.ghost.remove()
     touchDragState = null
@@ -494,23 +643,25 @@
     const el = document.elementFromPoint(touch.clientX, touch.clientY)
 
     const spacer = el?.closest('[data-spacer-index]') as HTMLElement | null
-    const item = el?.closest('[data-drag-index]') as HTMLElement | null
+    let item = el?.closest('[data-drag-index]') as HTMLElement | null
+    if(touchDragState.data.kind === 'folder' && item?.dataset.dragFolder){
+      item = findQuickInventoryFolderCard(item)
+    }
 
     if (spacer) {
       const idx = parseInt(spacer.dataset.spacerIndex!)
       const folder = spacer.dataset.spacerFolder || undefined
       moveSidebarItem(touchDragState.data, { index: idx, folder })
     } else if (item && item !== touchDragState.element) {
-      const idx = parseInt(item.dataset.dragIndex!)
-      const folder = item.dataset.dragFolder || undefined
-      if(item.dataset.dragKind === 'folder'){
-        moveSidebarItem(touchDragState.data, {
-          index: parseInt(item.dataset.folderLength ?? '0'),
-          folder: item.dataset.dragId,
-        })
-      }
-      else{
-        moveSidebarItem(touchDragState.data, { index: idx, folder })
+      const resolved = resolveAvatarCardDrop(
+        touchDragState.data,
+        item,
+        avatarCardTargetFromElement(item),
+        touch.clientX,
+        touch.clientY
+      )
+      if(resolved){
+        moveSidebarItem(touchDragState.data, resolved.drop)
       }
     }
 
@@ -797,10 +948,19 @@
         draggable={!isTouchDevice ? "true" : undefined}
         ondragstart={!isTouchDevice ? (e) => {avatarDragStart({ kind: char.type === 'normal' ? 'character' : 'folder', id: char.id }, e)} : undefined}
         ondragend={!isTouchDevice ? clearCurrentDrag : undefined}
-        ondragover={!isTouchDevice ? avatarDragOver : undefined}
-        ondrop={!isTouchDevice ? (e) => {avatarDrop(char.type === 'folder'
-          ? {index:char.folder.length, folder:char.id}
-          : {index:ind}, e)} : undefined}
+        ondragover={!isTouchDevice ? (e) => avatarDragOver(e, {
+          kind: char.type === 'normal' ? 'character' : 'folder',
+          id: char.id,
+          index: ind,
+          folderLength: char.type === 'folder' ? char.folder.length : undefined,
+        }) : undefined}
+        ondragleave={!isTouchDevice ? clearAvatarDragFeedback : undefined}
+        ondrop={!isTouchDevice ? (e) => {avatarCardDrop({
+          kind: char.type === 'normal' ? 'character' : 'folder',
+          id: char.id,
+          index: ind,
+          folderLength: char.type === 'folder' ? char.folder.length : undefined,
+        }, e)} : undefined}
         ondragenter={!isTouchDevice ? preventAll : undefined}
         ontouchstart={touchDragEnabled ? (e) => {onTouchDragStart({ kind: char.type === 'normal' ? 'character' : 'folder', id: char.id }, e)} : undefined}
       >
@@ -979,8 +1139,19 @@
               draggable={!isTouchDevice ? "true" : undefined}
               ondragstart={!isTouchDevice ? (e) => {avatarDragStart({ kind:'character', id:char2.id, folder:char.id }, e)} : undefined}
               ondragend={!isTouchDevice ? clearCurrentDrag : undefined}
-              ondragover={!isTouchDevice ? avatarDragOver : undefined}
-              ondrop={!isTouchDevice ? (e) => {avatarDrop({index: ind, folder:char.id}, e)} : undefined}
+              ondragover={!isTouchDevice ? (e) => avatarDragOver(e, {
+                kind: 'character',
+                id: char2.id,
+                index: ind,
+                folder: char.id,
+              }) : undefined}
+              ondragleave={!isTouchDevice ? clearAvatarDragFeedback : undefined}
+              ondrop={!isTouchDevice ? (e) => {avatarCardDrop({
+                kind: 'character',
+                id: char2.id,
+                index: ind,
+                folder: char.id,
+              }, e)} : undefined}
               ondragenter={!isTouchDevice ? preventAll : undefined}
               ontouchstart={touchDragEnabled ? (e) => {onTouchDragStart({ kind:'character', id:char2.id, folder:char.id }, e)} : undefined}
             >
@@ -1292,27 +1463,27 @@
       </div>
       {#if currentCharacter.license !== 'private'}
         <nav data-character-config-navigation aria-label={language.character} class="my-2 flex w-full items-center justify-evenly gap-1 rounded-lg bg-selected/25 p-1">
-          <button type="button" data-character-chat-home aria-label={language.Chat} aria-pressed={!$botMakerMode && !devTool} use:tooltip={language.Chat} class="character-toolbar-button character-toolbar-button--chat risu-button-lift" class:is-active={!$botMakerMode && !devTool} onclick={() => { devTool = false; botMakerMode.set(false) }}>
+          <button type="button" data-character-chat-home aria-label={language.Chat} aria-pressed={!$botMakerMode && !devTool && !$risuBardGalleryOpen} use:tooltip={language.Chat} class="character-toolbar-button character-toolbar-button--chat risu-button-lift" class:is-active={!$botMakerMode && !devTool && !$risuBardGalleryOpen} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(false) }}>
             <SolarBoldIcon name="chat-round-dots" size={22} />
           </button>
-          <button type="button" data-character-config-tab aria-label={language.characterInfo} use:tooltip={language.characterInfo} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 0} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 0} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(0) }}>
+          <button type="button" data-character-config-tab aria-label={language.characterInfo} use:tooltip={language.characterInfo} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 0} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 0} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(true); CharConfigSubMenu.set(0) }}>
             <SolarBoldIcon name="people-nearby" size={22} />
           </button>
-          <button type="button" data-character-config-tab aria-label={language.characterDisplay} use:tooltip={language.characterDisplay} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 1} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 1} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(1) }}>
+          <button type="button" data-character-config-tab aria-label={language.characterDisplay} use:tooltip={language.characterDisplay} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 1} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 1} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(true); CharConfigSubMenu.set(1) }}>
             <SolarBoldIcon name="gallery-wide" size={22} />
           </button>
-          <button type="button" data-character-config-tab aria-label={language.loreBook} use:tooltip={language.loreBook} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 3} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 3} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(3) }}>
+          <button type="button" data-character-config-tab aria-label={language.loreBook} use:tooltip={language.loreBook} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 3} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 3} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(true); CharConfigSubMenu.set(3) }}>
             <SolarBoldIcon name="notebook" size={22} />
           </button>
           {#if currentCharacter.type === 'character'}
-            <button type="button" data-character-config-tab aria-label={"TTS"} use:tooltip={"TTS"} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 5} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 5} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(5) }}>
-              <SolarBoldIcon name="microphone-3" size={22} />
+            <button type="button" data-risubard-gallery aria-label={language.gallery} use:tooltip={language.gallery} aria-pressed={$risuBardGalleryOpen} class="character-toolbar-button risu-button-lift" class:is-active={$risuBardGalleryOpen} onclick={() => { devTool = false; botMakerMode.set(false); risuBardGalleryOpen.set(true); MobileSideBar.set(0) }}>
+              <SolarBoldIcon name="camera-rotate" size={22} />
             </button>
-            <button type="button" data-character-config-tab aria-label={language.scripts} use:tooltip={language.scripts} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 4} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 4} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(4) }}>
+            <button type="button" data-character-config-tab aria-label={language.scripts} use:tooltip={language.scripts} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 4} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 4} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(true); CharConfigSubMenu.set(4) }}>
               <SolarBoldIcon name="code-square" size={22} />
             </button>
           {/if}
-          <button type="button" data-character-config-tab aria-label={language.advancedSettings} use:tooltip={language.advancedSettings} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 2} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 2} onclick={() => { devTool = false; botMakerMode.set(true); CharConfigSubMenu.set(2) }}>
+          <button type="button" data-character-config-tab aria-label={language.advancedSettings} use:tooltip={language.advancedSettings} aria-pressed={$botMakerMode && !devTool && $CharConfigSubMenu === 2} class="character-toolbar-button risu-button-lift" class:is-active={$botMakerMode && !devTool && $CharConfigSubMenu === 2} onclick={() => { devTool = false; risuBardGalleryOpen.set(false); botMakerMode.set(true); CharConfigSubMenu.set(2) }}>
             <SolarBoldIcon name="settings" size={22} />
           </button>
         </nav>
@@ -1387,20 +1558,18 @@
   }
   @keyframes sidebar-transition {
     from {
-      width: 0rem;
+      transform: translate3d(-100%, 0, 0);
     }
     to {
-      width: var(--sidebar-size);
+      transform: translate3d(0, 0, 0);
     }
   }
   @keyframes sidebar-transition-close {
     from {
-      width: var(--sidebar-size);
-      right:0rem;
+      transform: translate3d(0, 0, 0);
     }
     to {
-      width: 0rem;
-      right: 10rem;
+      transform: translate3d(-100%, 0, 0);
     }
   }
   @keyframes sidebar-transition-non-dynamic {
@@ -1483,8 +1652,6 @@
   .risu-sidebar-close.dynamic-sidebar {
     animation-name: sidebar-transition-close;
     animation-duration: var(--risu-animation-speed);
-    position: relative;
-    right: 3rem;
   }
 
 
@@ -1568,6 +1735,44 @@
   .folder-character-grid > .group {
     width: 56px;
     padding-inline: 0;
+  }
+  :global(.quick-inventory-drop-before)::before,
+  :global(.quick-inventory-drop-after)::after {
+    position: absolute;
+    z-index: 40;
+    top: 4px;
+    bottom: 4px;
+    width: 3px;
+    border-radius: 999px;
+    background: var(--color-success);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--color-success) 55%, transparent);
+    content: '';
+    pointer-events: none;
+  }
+  :global(.quick-inventory-drop-before)::before {
+    left: calc(var(--character-card-gap) / -2 - 1.5px);
+  }
+  :global(.quick-inventory-drop-after)::after {
+    right: calc(var(--character-card-gap) / -2 - 1.5px);
+  }
+  :global(.quick-inventory-drop-column.quick-inventory-drop-before)::before,
+  :global(.quick-inventory-drop-column.quick-inventory-drop-after)::after {
+    right: 4px;
+    left: 4px;
+    width: auto;
+    height: 3px;
+  }
+  :global(.quick-inventory-drop-column.quick-inventory-drop-before)::before {
+    top: calc(var(--character-card-gap) / -2 - 1.5px);
+    bottom: auto;
+  }
+  :global(.quick-inventory-drop-column.quick-inventory-drop-after)::after {
+    top: auto;
+    bottom: calc(var(--character-card-gap) / -2 - 1.5px);
+  }
+  :global(.quick-inventory-drop-inside) {
+    border-radius: .75rem;
+    background: color-mix(in srgb, var(--color-success) 18%, transparent);
   }
   .folder-character-grid {
     grid-column: 1 / -1;

@@ -6,10 +6,6 @@ const toast = readFileSync(
     resolve(process.cwd(), 'src/lib/UI/GUI/RequestStatusToast.svelte'),
     'utf8',
 )
-const toaster = readFileSync(
-    resolve(process.cwd(), 'src/lib/UI/GUI/Toaster.svelte'),
-    'utf8',
-)
 const requestPipeline = readFileSync(
     resolve(process.cwd(), 'src/ts/process/request/request.ts'),
     'utf8',
@@ -41,12 +37,6 @@ describe('request status injection manifest', () => {
         expect(toast).toContain('toast.dismiss(`req:${id}`)')
     })
 
-    test('keeps request status cards readable above alert dialogs and below top-tier blockers', () => {
-        const zIndex = Number(toaster.match(/z-index:\s*(\d+)/)?.[1])
-        expect(zIndex).toBeGreaterThan(2_147_483_600)
-        expect(zIndex).toBeLessThan(2_147_483_640)
-    })
-
     test('builds the manifest after preset normalization and strips private sources before adapter dispatch', () => {
         const normalizedAt = requestPipeline.indexOf('arg.formated = reformater')
         const manifestAt = requestPipeline.indexOf('buildInjectionManifest(')
@@ -75,6 +65,7 @@ describe('request status injection manifest', () => {
 
     test('preserves selected BardWiki and narrative-memory source identities', () => {
         expect(chatPipeline).toContain("kind: source.id.includes(':wiki:') ? 'wiki' : 'memory'")
-        expect(chatPipeline).toContain('name: narrativeSourceDisplayName(source.id)')
+        expect(chatPipeline).toContain('name: narrativeSourceDisplayName(')
+        expect(chatPipeline).toContain('source.displayName')
     })
 })

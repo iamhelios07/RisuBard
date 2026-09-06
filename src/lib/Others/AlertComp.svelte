@@ -723,6 +723,7 @@
 
 <ShAlertDialog
     open={$alertStore.type === 'ask'}
+    tier={$alertStore.tier ?? 'alert'}
     closeOnOutsideClick={true}
     onOpenChange={(v) => {
         if (!v && $alertStore.type === 'ask') {
@@ -842,6 +843,7 @@
 
 <ShDialog
     open={$alertStore.type === 'input'}
+    tier={$alertStore.tier ?? 'alert'}
     closable={false}
     closeOnOutsideClick={false}
 >

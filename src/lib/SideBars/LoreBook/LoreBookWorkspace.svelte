@@ -40,6 +40,7 @@
     import { resizeHandle } from 'src/ts/gui/resizeHandle'
     import { tooltip } from 'src/ts/gui/tooltip'
     import BardLoreActivationSelect from './BardLoreActivationSelect.svelte'
+    import LoreBuilder from 'src/lib/Others/LoreBuilder.svelte'
     import { loreBookVisualStatus } from './loreBookVisualStatus'
     import {
         readLorebookWorkspaceSession,
@@ -60,6 +61,7 @@
     import folderOpenIcon from 'src/assets/solar-bold/folder-open-bold.svg'
     import folderIcon from 'src/assets/solar-bold/folder-bold.svg'
     import editIcon from 'src/assets/solar-bold/pen-2-bold.svg'
+    import magicWandIcon from 'src/assets/solar-bold/magic-wand-bold.svg'
 
     interface Props {
         entries: loreBook[]
@@ -107,6 +109,8 @@
     let mobileView = $state<'list' | 'editor'>('list')
     let conditionView = $state(false)
     let linksDialogOpen = $state(false)
+    let loreBuilderOpen = $state(false)
+    let loreBuilderTarget = $state<{ id: string; name: string; content: string } | null>(null)
     const editorId = $props.id()
     const keyFields = ['key', 'secondkey'] as const
     let expandedKeys = $state({ key: false, secondkey: false })
@@ -600,6 +604,31 @@
             ? removeKeysFromEntries(base, selectedIds, field, keys)
             : addKeysToEntries(base, selectedIds, field, keys)
         emit(next)
+    }
+
+    function openLoreBuilder() {
+        if (!activeEntry?.id || activeEntry.mode === 'folder' || activeEntry.mode === 'child') return
+        const target = {
+            id: activeEntry.id,
+            name: drafts.comment.trim() || activeEntry.comment.trim() || activeEntry.key.trim() || language.lorebookWorkspace.untitledLore,
+            content: drafts.content,
+        }
+        commitDraft('content')
+        loreBuilderTarget = target
+        loreBuilderOpen = true
+    }
+
+    function applyLoreBuilderDraft(content: string) {
+        if (!loreBuilderTarget || !normalizedEntries.some((entry) => entry.id === loreBuilderTarget?.id)) {
+            throw new Error(language.lorebookWorkspace.loreBuilder.targetMissing)
+        }
+        if (activeId === loreBuilderTarget.id) {
+            const nextDirty = new Set(dirtyDraftFields)
+            nextDirty.delete('content')
+            dirtyDraftFields = nextDirty
+            drafts.content = content
+        }
+        patchEntry(loreBuilderTarget.id, { content })
     }
 
     function batchBardFieldState(field: 'activation'): BardLoreActivation | 'mixed'
@@ -1287,10 +1316,16 @@
                     <div class="content-field">
                         <div class="content-heading">
                             <span>{language.lorebookWorkspace.content}</span>
-                            <button type="button" data-cbs-view-toggle aria-pressed={conditionView} onclick={() => {
-                                commitDraft('content')
-                                conditionView = !conditionView
-                            }}>{conditionView ? language.cbsEditor.source : language.cbsEditor.view}</button>
+                            <div class="content-actions">
+                                <button type="button" data-lore-builder-open class="content-action lore-builder-launch" onclick={openLoreBuilder}>
+                                    <SolarIcon src={magicWandIcon} name="magic-wand-bold" size="1.15rem" />
+                                    {language.lorebookWorkspace.loreBuilder.launch}
+                                </button>
+                                <button type="button" data-cbs-view-toggle class="content-action" aria-pressed={conditionView} onclick={() => {
+                                    commitDraft('content')
+                                    conditionView = !conditionView
+                                }}>{conditionView ? language.cbsEditor.source : language.cbsEditor.view}</button>
+                            </div>
                         </div>
                         {#if conditionView}
                             <CbsConditionView
@@ -1504,6 +1539,16 @@
     </main>
 </section>
 
+{#if loreBuilderTarget}
+    <LoreBuilder
+        bind:open={loreBuilderOpen}
+        targetEntryId={loreBuilderTarget.id}
+        entryName={loreBuilderTarget.name}
+        currentContent={loreBuilderTarget.content}
+        onApplyDraft={applyLoreBuilderDraft}
+    />
+{/if}
+
 {#if activeBardEntry}
     <ShDialog
         bind:open={linksDialogOpen}
@@ -1676,7 +1721,9 @@
     .editor-fields input, .editor-fields textarea { min-width: 0; width: 100%; padding: .48rem .55rem; color: var(--color-textcolor); }
     .content-field { display: grid; min-height: 6rem; flex: 1; gap: .3rem; grid-template-rows: auto minmax(0, 1fr); }
     .content-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--color-textcolor2); font-size: .74rem; font-weight: 650; }
-    .content-heading button { padding: .25rem .6rem; border: 1px solid var(--color-darkborderc); border-radius: .35rem; color: var(--color-textcolor); font-size: .72rem; font-weight: 500; }
+    .content-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
+    .content-heading .content-action { display: inline-flex; min-height: 2.15rem; align-items: center; justify-content: center; gap: .38rem; padding: 0 .62rem; border: 1px solid var(--color-darkborderc); border-radius: .5rem; color: var(--color-textcolor); font-size: .8rem; font-weight: 650; }
+    .content-heading .lore-builder-launch { background: var(--color-selected); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-borderc) 55%, transparent); }
     .content-heading button:hover, .content-heading button[aria-pressed='true'] { background: var(--color-selected); }
     .lore-content {
         min-height: 0;

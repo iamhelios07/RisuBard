@@ -16,6 +16,7 @@ import { PluginChatOutputListeners, V2_CHAT_OUTPUT_OWNER, createV2ChatOutputApi 
 import type { PluginProviderStructuredOutput } from './providerStructuredOutput';
 
 export const customProviderStore = writable([] as string[])
+export const pluginProviderOwners = new Map<string, string>()
 
 interface ProviderPlugin {
     name: string
@@ -430,6 +431,7 @@ export async function importPlugin(code:string|null = null, argu:{
         }
 
         await loadPlugins()
+        return true
         
     } catch (error) {
         console.error(error)
@@ -474,9 +476,9 @@ export type PluginV2ProviderOptions = {
     tokenizer?: string
     tokenizerFunc?: (content: string) => number[] | Promise<number[]>
     /** RisuBard keeps its host status UI by default; set true only when the plugin replaces the host request status UI. */
-    overrideRequestStatus?: boolean | (() => boolean)
+    overrideRequestStatus?: boolean | (() => boolean | Promise<boolean>)
     /** Legacy inverse switch. Prefer `overrideRequestStatus: true` for plugin-owned status UI. */
-    hostRequestStatus?: boolean | (() => boolean)
+    hostRequestStatus?: boolean | (() => boolean | Promise<boolean>)
     /** Plugin storage key whose `risubard` value opts in dynamically. */
     hostRequestStatusStorageKey?: string
     /** Receive response_schema and translate it to the upstream provider's native structured-output format. */
@@ -526,7 +528,7 @@ export const allowedDbKeys = [
     'characterOrder'
 ]
 
-export const getV2PluginAPIs = () => {
+export const getV2PluginAPIs = (pluginName = '') => {
     const chatOutputApi = createV2ChatOutputApi(pluginV2.chatOutput)
     return {
         risuFetch: globalFetch,
@@ -554,6 +556,7 @@ export const getV2PluginAPIs = () => {
             provs.push(name)
             pluginV2.providers.set(name, func)
             pluginV2.providerOptions.set(name, options ?? {})
+            if (pluginName) pluginProviderOwners.set(name, pluginName)
             customProviderStore.set(provs)
         },
         addRisuScriptHandler: (name: ScriptMode, func: EditFunction) => {
@@ -853,6 +856,7 @@ export async function loadV2Plugin(plugins: RisuPlugin[]) {
     globalThis.__pluginApis__ = getV2PluginAPIs()
 
     for (const plugin of plugins) {
+        globalThis.__pluginApis__ = getV2PluginAPIs(plugin.name)
         let data = ''
         let version = plugin.version || 2
 

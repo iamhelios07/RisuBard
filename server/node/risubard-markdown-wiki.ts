@@ -32,7 +32,7 @@ export interface MarkdownWikiDocument {
 export type MarkdownWikiContextMode = 'always' | 'auto' | 'never'
 
 export type MarkdownWikiDocumentType = 'event' | 'character' | 'location'
-    | 'scene' | 'faction' | 'item' | 'concept' | 'other'
+    | 'scene' | 'faction' | 'creature' | 'item' | 'concept' | 'other'
 export type CanonicalMarkdownWikiDocumentType = Exclude<
     MarkdownWikiDocumentType,
     'event'
@@ -48,6 +48,7 @@ export interface MarkdownWikiView {
 export interface MarkdownWikiHealth {
     danglingLinks: Array<{ sourceId: string; target: string }>
     unlinkedDocumentIds: string[]
+    duplicatePassages: Array<{ documentIds: [string, string] }>
 }
 
 interface RebootRecoveryManifest {
@@ -144,6 +145,22 @@ function stableId(sourceMessageIds: readonly string[]): string {
         .slice(0, 24)
 }
 
+function isLegacyFirstMessageCheckpoint(
+    sourceMessageIds: readonly string[]
+): boolean {
+    return /^first-message:.+:-?\d+$/.test(sourceMessageIds[0] ?? '')
+}
+
+function matchesRebootSourceMessageIds(
+    checkpoint: readonly string[],
+    requested: readonly string[]
+): boolean {
+    if (JSON.stringify(checkpoint) === JSON.stringify(requested)) return true
+    return checkpoint.length === requested.length + 1
+        && isLegacyFirstMessageCheckpoint(checkpoint)
+        && JSON.stringify(checkpoint.slice(1)) === JSON.stringify(requested)
+}
+
 function readableStem(value: string): string {
     return value.normalize('NFKC')
         .replace(/[<>:"/\\|?*\u0000-\u001f]/g, ' ')
@@ -224,7 +241,8 @@ function parseRebootRecoveryManifest(value: unknown): RebootRecoveryManifest {
         'documents', ...(hasReceipt ? ['receipt'] : []),
     ]
     const canonicalTypes: readonly string[] = [
-        'character', 'location', 'scene', 'faction', 'item', 'concept', 'other',
+        'character', 'location', 'scene', 'faction', 'creature', 'item',
+        'concept', 'other',
     ]
     if (Object.keys(record).length !== expectedKeys.length
         || !expectedKeys.every((key) => Object.hasOwn(record, key))
@@ -397,8 +415,8 @@ function parseDocument(
     const normalized = normalizeMarkdown(storedContent)
     const type = plainScalar('type')
     if (![
-        'event', 'character', 'location', 'scene', 'faction', 'item',
-        'concept', 'other',
+        'event', 'character', 'location', 'scene', 'faction', 'creature',
+        'item', 'concept', 'other',
     ].includes(type)) {
         throw new Error('Invalid Markdown wiki type')
     }
@@ -500,8 +518,44 @@ function computeHealth(documents: MarkdownWikiDocument[]): MarkdownWikiHealth {
             connected.add(resolved.id)
         }
     }
+    const passageDocuments = new Map<string, Set<string>>()
+    for (const document of documents) {
+        if (document.status !== 'active' || document.type === 'scene') continue
+        const passages = new Set(document.content.split(/\r?\n\s*\r?\n/)
+            .map((passage) => passage.trim())
+            .filter((passage) => passage.length > 0
+                && !/^#{1,6}\s/u.test(passage)
+                && passage.replace(/\[\[[^\]]+\]\]/g, '')
+                    .replace(/[\s\-*•,;:|]+/gu, '').length > 0)
+            .map((passage) => passage.normalize('NFKC').toLocaleLowerCase()
+                .replace(/\s+/gu, ' ').trim())
+            .filter((passage) => Array.from(passage).length >= 80))
+        for (const passage of passages) {
+            const owners = passageDocuments.get(passage) ?? new Set<string>()
+            owners.add(document.id)
+            passageDocuments.set(passage, owners)
+        }
+    }
+    const duplicatePairKeys = new Set<string>()
+    const duplicatePassages: MarkdownWikiHealth['duplicatePassages'] = []
+    for (const owners of passageDocuments.values()) {
+        const ids = [...owners].sort()
+        for (let left = 0; left < ids.length; left += 1) {
+            for (let right = left + 1; right < ids.length; right += 1) {
+                const documentIds: [string, string] = [ids[left], ids[right]]
+                const key = documentIds.join('\n')
+                if (duplicatePairKeys.has(key)) continue
+                duplicatePairKeys.add(key)
+                duplicatePassages.push({ documentIds })
+            }
+        }
+    }
+    duplicatePassages.sort((left, right) =>
+        left.documentIds.join('\n').localeCompare(right.documentIds.join('\n'))
+    )
     return {
         danglingLinks,
+        duplicatePassages: duplicatePassages.slice(0, 64),
         unlinkedDocumentIds: documents
             .filter((document) => document.type !== 'event'
                 && document.type !== 'scene'
@@ -573,6 +627,17 @@ export function createMarkdownNarrativeWiki(
     const workspaceFor = (characterId: string, chatId: string) =>
         resolveMarkdownWikiWorkspace(userDataDirectory, characterId, chatId)
     const documentCache = new Map<string, MarkdownWikiDocument[]>()
+    type BardChatUndoFile = { relativePath: string; contents: string }
+    type BardChatUndoSnapshot = {
+        characterId: string
+        chatId: string
+        files: BardChatUndoFile[]
+        signature: string
+    }
+    let bardChatUndoSnapshot: BardChatUndoSnapshot | null = null
+    let pendingBardChatUndo: Omit<BardChatUndoSnapshot, 'signature'> & {
+        beforeSignature: string
+    } | null = null
 
     const cleanupLegacySnapshots = async (
         characterId: string,
@@ -683,6 +748,7 @@ export function createMarkdownNarrativeWiki(
             [workspace.charactersDirectory, 'characters'],
             [workspace.locationsDirectory, 'locations'],
             [resolve(workspace.directory, 'factions'), 'factions'],
+            [resolve(workspace.directory, 'creatures'), 'creatures'],
             [resolve(workspace.directory, 'items'), 'items'],
             [resolve(workspace.directory, 'concepts'), 'concepts'],
             [resolve(workspace.directory, 'notes'), 'notes'],
@@ -751,6 +817,34 @@ export function createMarkdownNarrativeWiki(
             ?? refreshDocuments(characterId, chatId)
     }
 
+    const snapshotSignature = (
+        documents: readonly MarkdownWikiDocument[]
+    ): string => createHash('sha256').update(JSON.stringify(
+        [...documents]
+            .sort((left, right) => left.relativePath.localeCompare(right.relativePath))
+            .map((document) => [
+                document.id, document.relativePath, document.contentHash,
+            ])
+    )).digest('base64url')
+
+    const captureBardChatFiles = async (
+        characterId: string,
+        chatId: string
+    ): Promise<{ files: BardChatUndoFile[]; signature: string }> => {
+        const workspace = workspaceFor(characterId, chatId)
+        const documents = await refreshDocuments(characterId, chatId)
+        return {
+            signature: snapshotSignature(documents),
+            files: await Promise.all(documents.map(async (document) => ({
+                relativePath: document.relativePath,
+                contents: await fileSystem.readFile(join(
+                    workspace.directory,
+                    ...document.relativePath.split('/')
+                ), 'utf8'),
+            }))),
+        }
+    }
+
     const rebuildIndex = async (
         characterId: string,
         chatId: string,
@@ -782,6 +876,97 @@ export function createMarkdownNarrativeWiki(
     return {
         invalidateCache(characterId: string, chatId: string): void {
             documentCache.delete(workspaceFor(characterId, chatId).directory)
+        },
+        async beginBardChatUndo(input: {
+            characterId: string
+            chatId: string
+        }): Promise<{ started: true }> {
+            const characterId = required(input.characterId, 'Character ID')
+            const chatId = required(input.chatId, 'Chat ID')
+            const captured = await captureBardChatFiles(characterId, chatId)
+            pendingBardChatUndo = {
+                characterId,
+                chatId,
+                files: captured.files,
+                beforeSignature: captured.signature,
+            }
+            return { started: true }
+        },
+        async finalizeBardChatUndo(input: {
+            characterId: string
+            chatId: string
+        }): Promise<{ available: boolean }> {
+            const characterId = required(input.characterId, 'Character ID')
+            const chatId = required(input.chatId, 'Chat ID')
+            const pending = pendingBardChatUndo
+            if (!pending || pending.characterId !== characterId
+                || pending.chatId !== chatId) {
+                throw new Error('BARDCHAT undo snapshot was not started')
+            }
+            const current = await captureBardChatFiles(characterId, chatId)
+            if (current.signature !== pending.beforeSignature) {
+                bardChatUndoSnapshot = {
+                    characterId,
+                    chatId,
+                    files: pending.files,
+                    signature: current.signature,
+                }
+            }
+            pendingBardChatUndo = null
+            return {
+                available: bardChatUndoSnapshot?.characterId === characterId
+                    && bardChatUndoSnapshot.chatId === chatId,
+            }
+        },
+        async getBardChatUndoStatus(input: {
+            characterId: string
+            chatId: string
+        }): Promise<{ available: boolean }> {
+            const characterId = required(input.characterId, 'Character ID')
+            const chatId = required(input.chatId, 'Chat ID')
+            return {
+                available: bardChatUndoSnapshot?.characterId === characterId
+                    && bardChatUndoSnapshot.chatId === chatId,
+            }
+        },
+        async restoreBardChatUndo(input: {
+            characterId: string
+            chatId: string
+        }): Promise<{ restored: true }> {
+            const characterId = required(input.characterId, 'Character ID')
+            const chatId = required(input.chatId, 'Chat ID')
+            const snapshot = bardChatUndoSnapshot
+            if (!snapshot || snapshot.characterId !== characterId
+                || snapshot.chatId !== chatId) {
+                throw new Error('No BARDCHAT undo snapshot is available')
+            }
+            const workspace = workspaceFor(characterId, chatId)
+            const current = await refreshDocuments(characterId, chatId)
+            if (snapshotSignature(current) !== snapshot.signature) {
+                throw new Error('Wiki changed after the BARDCHAT command')
+            }
+            const baselinePaths = new Set(snapshot.files.map((file) =>
+                file.relativePath
+            ))
+            for (const file of snapshot.files) {
+                const target = join(
+                    workspace.directory,
+                    ...file.relativePath.split('/')
+                )
+                await fileSystem.mkdir(resolve(target, '..'), { recursive: true })
+                await writeAtomically(fileSystem, target, file.contents)
+            }
+            for (const document of current) {
+                if (baselinePaths.has(document.relativePath)) continue
+                await fileSystem.rm(join(
+                    workspace.directory,
+                    ...document.relativePath.split('/')
+                ), { force: true })
+            }
+            await rebuildIndex(characterId, chatId)
+            bardChatUndoSnapshot = null
+            pendingBardChatUndo = null
+            return { restored: true }
         },
         async recoverRebootBatch(input: {
             characterId: string
@@ -822,11 +1007,24 @@ export function createMarkdownNarrativeWiki(
                     && await cleanupUnpublishedRecovery(workspace)) return null
                 throw error
             }
+            const sourceMatches = matchesRebootSourceMessageIds(
+                manifest.sourceMessageIds,
+                sourceMessageIds
+            )
+            const eventGroupsMatch = JSON.stringify(manifest.eventSourceGroups)
+                === JSON.stringify(eventSourceGroups)
+            if (manifest.receipt
+                && isLegacyFirstMessageCheckpoint(manifest.sourceMessageIds)
+                && (!sourceMatches || !eventGroupsMatch)) {
+                await fileSystem.rm(recoveryDirectory, {
+                    recursive: true,
+                    force: true,
+                })
+                return null
+            }
             if (manifest.version !== 1
-                || JSON.stringify(manifest.sourceMessageIds)
-                    !== JSON.stringify(sourceMessageIds)
-                || JSON.stringify(manifest.eventSourceGroups)
-                    !== JSON.stringify(eventSourceGroups)
+                || !sourceMatches
+                || !eventGroupsMatch
                 || !Array.isArray(manifest.documents)) {
                 throw new Error('Wiki reboot recovery checkpoint is invalid')
             }
@@ -1062,8 +1260,10 @@ export function createMarkdownNarrativeWiki(
                 throw error
             }
             if (manifest.version !== 1
-                || JSON.stringify(manifest.sourceMessageIds)
-                    !== JSON.stringify(sourceMessageIds)) {
+                || !matchesRebootSourceMessageIds(
+                    manifest.sourceMessageIds,
+                    sourceMessageIds
+                )) {
                 throw new Error('Wiki reboot recovery checkpoint does not match')
             }
             await fileSystem.rm(recoveryDirectory, {
@@ -1217,6 +1417,7 @@ export function createMarkdownNarrativeWiki(
                 location: 'locations',
                 scene: '',
                 faction: 'factions',
+                creature: 'creatures',
                 item: 'items',
                 concept: 'concepts',
                 other: 'notes',
@@ -1407,8 +1608,8 @@ export function createMarkdownNarrativeWiki(
         }): Promise<MarkdownWikiDocument> {
             const title = required(input.title, 'Title').trim().slice(0, 160)
             const allowed: MarkdownWikiDocumentType[] = [
-                'character', 'location', 'scene', 'faction', 'item',
-                'concept', 'other', 'event',
+                'character', 'location', 'scene', 'faction', 'creature',
+                'item', 'concept', 'other', 'event',
             ]
             if (!allowed.includes(input.type)) {
                 throw new Error('Invalid manual wiki document type')
@@ -1442,6 +1643,7 @@ export function createMarkdownNarrativeWiki(
                 location: 'locations',
                 scene: '',
                 faction: 'factions',
+                creature: 'creatures',
                 item: 'items',
                 concept: 'concepts',
                 other: 'notes',
@@ -1845,8 +2047,11 @@ export function createMarkdownNarrativeWiki(
                 score: number
                 occurredAt: number
             }[]
+            sourceLimit?: number
             tokenBudget?: {
                 target: number
+                events?: number
+                perSource?: number
                 maximum: number
             }
         }) {
@@ -1862,6 +2067,9 @@ export function createMarkdownNarrativeWiki(
                 ...(input.sourceMatches
                     ? { sourceMatches: input.sourceMatches }
                     : {}),
+                ...(input.sourceLimit === undefined
+                    ? {}
+                    : { sourceLimit: input.sourceLimit }),
                 ...(input.tokenBudget
                     ? { tokenBudget: input.tokenBudget }
                     : {}),

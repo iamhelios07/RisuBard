@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
 
 const { createUserDataRepository } = require('../server/node/user-data-repository.cjs')
@@ -176,6 +177,21 @@ function inventory(root: string): string[] {
 }
 
 describe('standalone V2 to v0.9.25 V1 converter', () => {
+    test('the CLI creates a sibling -v1 folder when only the V2 source is supplied', () => {
+        const { source } = makeFixture()
+        const destination = `${source}-v1`
+        const before = inventory(source)
+
+        const result = spawnSync(process.execPath, [path.resolve('scripts/convert-v2-to-v0925.cjs'), source], {
+            encoding: 'utf8',
+        })
+
+        expect(result.status, result.stderr).toBe(0)
+        expect(JSON.parse(result.stdout)).toMatchObject({ destination: path.resolve(destination), characters: 1 })
+        expect(fs.existsSync(path.join(destination, 'conversion/v2-to-v0925.json'))).toBe(true)
+        expect(inventory(source)).toEqual(before)
+    })
+
     test('decodes V2 data into a verified V1 root without changing the source', () => {
         const { source, destination, avatar, pluginState } = makeFixture()
         const before = inventory(source)

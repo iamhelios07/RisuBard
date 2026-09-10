@@ -689,12 +689,13 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
 }
 
 if (require.main === module) {
-    const [source, destination, ...extra] = process.argv.slice(2);
-    if (!source || !destination || extra.length) {
-        console.error('Usage: node scripts/convert-v2-to-v0925.cjs <v2-source-root> <new-v1-destination>');
+    const [source, explicitDestination, ...extra] = process.argv.slice(2);
+    if (!source || extra.length) {
+        console.error('Usage: node scripts/convert-v2-to-v0925.cjs <v2-source-root> [new-v1-destination]');
         process.exitCode = 1;
     } else {
         try {
+            const destination = explicitDestination || `${path.resolve(source)}-v1`;
             const result = convertV2ToV0925(source, destination);
             console.log(JSON.stringify(result, null, 2));
         } catch (error) {

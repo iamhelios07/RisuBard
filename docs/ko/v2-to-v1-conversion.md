@@ -4,32 +4,48 @@ RisuBard 0.9.28은 0.9.25의 V1 저장 구조를 사용합니다. 0.9.26~0.9.27�
 
 변환기는 원본 폴더를 읽기만 합니다. 원본 안의 파일을 수정하거나 삭제하지 않으며, 이미 존재하는 목적지에는 쓰지 않습니다. 변환이 끝나기 전에는 임시 폴더에 저장하고 전체 검증이 성공한 경우에만 목적지 이름으로 바꿉니다.
 
-## 변환 전 준비
+## Windows 포터블판: 폴더를 끌어다 놓기
 
 1. 실행 중인 RisuBard를 모두 종료합니다.
-2. V2 원본과 충분한 여유 공간이 있는 새 목적지 경로를 정합니다.
-3. 목적지 폴더가 아직 존재하지 않는지 확인합니다. 원본의 내부나 상위 폴더를 목적지로 지정할 수 없습니다.
+2. V2 데이터 폴더를 포터블 폴더의 `V2-to-V1.bat` 위에 끌어다 놓습니다.
+3. 완료될 때까지 기다립니다.
 
-## 소스 저장소에서 실행
+원본이 `E:\RisuBard-userdata`라면 결과는 자동으로 `E:\RisuBard-userdata-v1`에 생성됩니다. 결과 폴더가 이미 있으면 덮어쓰지 않고 중단합니다.
 
-RisuBard 소스 폴더에서 PowerShell을 열고 다음 명령을 실행합니다.
+## 명령어로 실행
+
+RisuBard 소스 폴더에서는 V2 원본 경로 하나만 지정합니다.
 
 ```powershell
-pnpm run convert:v2-to-v1 -- "E:\RisuBard-userdata-v2" "E:\RisuBard-userdata-v1"
+pnpm run convert:v2-to-v1 -- "E:\RisuBard-userdata"
 ```
 
-Node.js로 직접 실행해도 됩니다.
+결과는 자동으로 `E:\RisuBard-userdata-v1`에 생성됩니다. 목적지를 직접 지정해야 할 때만 두 번째 경로를 추가합니다.
 
 ```powershell
 node scripts/convert-v2-to-v0925.cjs "E:\RisuBard-userdata-v2" "E:\RisuBard-userdata-v1"
 ```
 
-## 포터블판에서 실행
+Linux·macOS 포터블판에서는 다음처럼 실행합니다.
 
-0.9.28 포터블 폴더에서 PowerShell을 열고 다음 명령을 실행합니다.
+```bash
+./V2-to-V1.sh "/path/to/RisuBard-userdata"
+```
 
-```powershell
-.\bin\node.exe .\scripts\convert-v2-to-v0925.cjs "E:\RisuBard-userdata-v2" "E:\RisuBard-userdata-v1"
+## Android Termux
+
+RisuBard 소스 폴더에서 서버를 종료한 뒤 다음 한 줄을 실행합니다.
+
+```bash
+bash scripts/termux/downgrade-and-start-v1.sh
+```
+
+기본 V2 데이터인 `$HOME/.local/share/risubard`를 읽어 `$HOME/.local/share/risubard-v1`을 만든 뒤, 그 V1 폴더로 서버를 바로 시작합니다. 이후에도 같은 명령을 사용하면 변환을 반복하지 않고 기존 V1 결과로 서버를 시작합니다.
+
+`RISUBARD_DATA_ROOT`로 다른 폴더를 사용했던 경우에는 그 V2 경로 하나만 지정합니다.
+
+```bash
+bash scripts/termux/downgrade-and-start-v1.sh "/data/data/com.termux/files/home/my-risubard-data"
 ```
 
 ## 변환 결과 확인

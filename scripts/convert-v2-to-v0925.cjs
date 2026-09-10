@@ -116,7 +116,8 @@ function readJson(root, relative, validate) {
     return value;
 }
 
-function treeDigest(root) {
+function treeDigest(root, options = {}) {
+    const includeMetadata = options.includeMetadata !== false;
     const hash = crypto.createHash('sha256');
     assertNoLink(root, 'V2 source');
     if (!fs.statSync(root).isDirectory()) throw new Error(`Expected a directory: ${root}`);
@@ -134,7 +135,8 @@ function treeDigest(root) {
                 visit(local);
             } else if (before.isFile()) {
                 const beforeBig = fs.lstatSync(target, { bigint: true });
-                hash.update(`f\0${normalized}\0${beforeBig.size}\0${beforeBig.mtimeNs}\0${beforeBig.ctimeNs}\0`);
+                hash.update(`f\0${normalized}\0${beforeBig.size}\0`);
+                if (includeMetadata) hash.update(`${beforeBig.mtimeNs}\0${beforeBig.ctimeNs}\0`);
                 hash.update(digestFile(target));
                 const after = fs.lstatSync(target, { bigint: true });
                 if (beforeBig.size !== after.size || beforeBig.mtimeNs !== after.mtimeNs || beforeBig.ctimeNs !== after.ctimeNs) {
@@ -580,7 +582,8 @@ function verifyStage(stage, expected) {
         const destination = path.join(stage, entry.name);
         if (!fs.existsSync(destination)) throw new Error(`Pass-through entry is missing: ${entry.name}`);
         if (entry.directory) {
-            if (!fs.statSync(destination).isDirectory() || treeDigest(source) !== treeDigest(destination)) {
+            if (!fs.statSync(destination).isDirectory()
+                || treeDigest(source, { includeMetadata: false }) !== treeDigest(destination, { includeMetadata: false })) {
                 throw new Error(`Pass-through tree verification failed: ${entry.name}`);
             }
         } else {

@@ -970,14 +970,7 @@ if(existsSync(passwordPath)){
 // so we moved JWT signing/verification to the server using HMAC-SHA256.
 // If upstream changes its auth flow, this section needs manual sync.
 // Related: createServerJwt(), checkAuth(), /api/login, /api/token/refresh
-const jwtSecretPath = path.join(savePath, '__jwt_secret')
-let jwtSecret
-if (existsSync(jwtSecretPath)) {
-    jwtSecret = readFileSync(jwtSecretPath, 'utf-8').trim()
-} else {
-    jwtSecret = nodeCrypto.randomBytes(64).toString('hex')
-    writeFileSync(jwtSecretPath, jwtSecret, 'utf-8')
-}
+const jwtSecret = require('./jwt-secret.cjs').loadJwtSecret(savePath)
 
 // ── Instance ID for anonymous usage analytics ────────────────────────────────
 const instanceIdPath = path.join(savePath, '__instance_id')

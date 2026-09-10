@@ -101,6 +101,9 @@ jobs:
       - name: Smoke test portable server
         shell: bash
         run: |
+          node scripts/portable-package.cjs verify portable
+          RISUBARD_DATA_ROOT="$(node scripts/portable-package.cjs prepare-smoke portable)"
+          export RISUBARD_DATA_ROOT
           cd portable
           LOG_FILE="$(mktemp)"
           PORT=0 RISU_UPDATE_CHECK=false node server/node/server.cjs >"$LOG_FILE" 2>&1 &
@@ -109,6 +112,7 @@ jobs:
             kill "$SERVER_PID" 2>/dev/null || true
             wait "$SERVER_PID" 2>/dev/null || true
             rm -f "$LOG_FILE"
+            node -e "const fs=require('fs'),p=require('path'),os=require('os'),r=p.resolve(process.env.RISUBARD_DATA_ROOT); if(p.dirname(r)!==p.resolve(os.tmpdir())||!p.basename(r).startsWith('risubard-portable-smoke-'))throw Error('Unsafe smoke directory');fs.rmSync(r,{recursive:true,force:true})"
           }
           trap cleanup EXIT
           for _ in {1..30}; do
@@ -314,6 +318,7 @@ jobs:
         if: matrix.platform == 'win'
         shell: bash
         run: |
+          node scripts/portable-package.cjs verify portable
           VERSION="${{ steps.version.outputs.version }}"
           NAME="RisuBard-v${VERSION}-win-x64"
           cd portable
@@ -323,6 +328,7 @@ jobs:
         if: matrix.platform != 'win'
         shell: bash
         run: |
+          node scripts/portable-package.cjs verify portable
           VERSION="${{ steps.version.outputs.version }}"
           NAME="RisuBard-v${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
           mv portable "$NAME"

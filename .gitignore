@@ -51,6 +51,7 @@ dist.zip
 !/scripts/rehearse-save-migration.cjs
 !/scripts/recover-save-index.cjs
 !/scripts/recover-save.ps1
+!/scripts/portable-package.cjs
 !/scripts/portable/
 !/scripts/termux/
 !/scripts/check-help-keys.mjs

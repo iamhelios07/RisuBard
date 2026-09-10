@@ -58,6 +58,35 @@ test('consent is read-only; insufficient space cannot start; decline closes gate
     expect(inventory(root, true)).toEqual(before)
 })
 
+test('consent responds before replanning a large save and exposes later worker failures', async () => {
+    const { root } = fixture(); seed(root)
+    const info = { enoughSpace: true, requiredBytes: 1, availableBytes: 100 }
+    let releaseInspection!: (value: typeof info) => void
+    const delayed = new Promise(resolve => { releaseInspection = resolve })
+    const inspect = vi.fn().mockResolvedValueOnce(info).mockReturnValue(delayed)
+    const worker = vi.fn().mockRejectedValue(new Error('Source changed before conversion'))
+    let listening!: (value: { port: number, token: string }) => void
+    const ready = new Promise<{ port: number, token: string }>(resolve => { listening = resolve })
+    const run = beforeStartup({ root, port: 0, inspect, worker,
+        onListening: (port: number, token: string) => listening({ port, token }) })
+    const { port, token } = await ready, url = `http://127.0.0.1:${port}`
+    const headers = { 'x-migration-token': token }
+    try {
+        const response = await fetch(url + '/start', { method: 'POST', headers, signal: AbortSignal.timeout(1000) })
+        expect(response.ok).toBe(true)
+        await vi.waitFor(async () => {
+            const state = await (await fetch(url + '/status', { headers })).json()
+            expect(state.phase).toBe('failed')
+            expect(state.error).toBe('Source changed before conversion')
+        })
+    } finally {
+        releaseInspection(info)
+        await vi.waitFor(() => expect(worker).toHaveBeenCalledOnce())
+        await fetch(url + '/exit', { method: 'POST', headers })
+        await run
+    }
+})
+
 test('worker verifies and activates V2, retains byte-identical original and removes active duplicate assets', () => {
     const { root, backup } = fixture(); seed(root)
     const before = inventory(root, true)
@@ -257,6 +286,46 @@ test('carries drafts, wiki and inlays into the new tree', () => {
     const r = createUserDataRepository({ dataRoot: root })
     expect(r.loadAssistantDraft('a', 'chat')).toEqual({ text: 'unfinished' })
     for (const name of ['risubard', 'inlays']) expect(fs.readFileSync(path.join(root, name, 'keep.txt'), 'utf8')).toBe(name)
+})
+
+test.each([
+    ['healthy', 'all'], ['empty', 'all'], ['healthy', 'personas'], ['healthy', 'chats'],
+])('refuses valid but empty V1 catalogs over surviving files with a %s cache (%s)', async (cache, kind) => {
+    const { root, backup } = fixture(); seed(root)
+    const script = `const root=process.argv[1];
+        const store=require('./server/node/file-kv.cjs').createFileKv({dataRoot:root});
+        const utils=require('./server/node/utils.cjs');
+        utils.decodeRisuSave(store.kvGet('database/database.bin')).then(db=>{
+            db.personas=[{id:'persona',name:'Keep this persona',personaPrompt:'Preserved text'}];
+            require('./server/node/user-data-repository.cjs').createUserDataRepository({dataRoot:root}).importLegacyDatabase(db,{mode:'sync'});
+            const empty=JSON.parse(require('fs').readFileSync(require('path').join(root,'index/sidebar.json'),'utf8'));
+            if(process.argv[3]==='all'){empty.characters=[];for(const key of Object.keys(empty.collections))empty.collections[key]=[];}
+            else if(process.argv[3]==='personas')empty.collections.personas=[];
+            else empty.characters[0].chats=[];
+            for(const file of ['index/sidebar.json','settings/entity-order.json'])require('./server/node/file-store.cjs').atomicWriteJson(root,file,empty);
+            if(process.argv[2]==='empty')store.kvSet('database/database.bin',Buffer.from(utils.encodeRisuSaveLegacy({characters:[],modules:[],personas:[],botPresets:[],loreBook:[]})));
+        })`
+    execFileSync(process.execPath, ['-e', script, root, cache, kind], { stdio: 'pipe' })
+    const before = inventory(root, true)
+    await expect(inspect(root, backup)).rejects.toThrow(/recover-save\.bat/)
+    expect(() => execFileSync(process.execPath, [path.resolve('server/node/v2-migration-worker.cjs'), root, backup], { stdio: 'pipe' })).toThrow(/recover-save\.bat/)
+    expect(inventory(root, true)).toEqual(before)
+    expect(fs.existsSync(backup)).toBe(false)
+})
+
+test('allows an intentionally empty V1 save whose deleted files are only in trash', () => {
+    const { root, backup } = fixture(); seed(root)
+    const script = `const root=process.argv[1], store=require('./server/node/file-kv.cjs').createFileKv({dataRoot:root});
+        require('./server/node/utils.cjs').decodeRisuSave(store.kvGet('database/database.bin')).then(db=>{
+            const repo=require('./server/node/user-data-repository.cjs').createUserDataRepository({dataRoot:root});
+            repo.importLegacyDatabase(db,{mode:'replace'});
+            db.characters=[];repo.importLegacyDatabase(db,{mode:'replace'});
+        })`
+    execFileSync(process.execPath, ['-e', script, root], { stdio: 'pipe' })
+    const before = inventory(root, true)
+    execFileSync(process.execPath, [path.resolve('server/node/v2-migration-worker.cjs'), root, backup], { stdio: 'pipe' })
+    expect(inventory(backup, true)).toEqual(before)
+    expect(require('./user-data-repository.cjs').createUserDataRepository({dataRoot:root}).exportLegacyDatabase().characters).toEqual([])
 })
 
 test('canonical V1 messages and settings take precedence over an older compatibility cache', () => {

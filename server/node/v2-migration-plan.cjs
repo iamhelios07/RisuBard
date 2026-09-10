@@ -73,6 +73,23 @@ function openSource(root, workspace) {
         close() { sqlite?.close(); } };
 }
 
+function assertNonemptyV1Catalogs(database, files) {
+    const collections = { presets: 'botPresets', personas: 'personas', modules: 'modules', lorebooks: 'loreBook' };
+    const chats = new Map(database.characters.map(character => [character.chaId, character.chats.length]));
+    for (const [relative, size] of files) {
+        if (typeof size !== 'number') continue;
+        const parts = relative.split(path.sep);
+        const field = Object.hasOwn(collections, parts[0]) ? collections[parts[0]] : null;
+        const hiddenCharacter = parts.length === 3 && parts[0] === 'characters' && parts[2] === 'metadata.json' && !database.characters.length;
+        const hiddenCollection = parts.length === 2 && field && parts[1].endsWith('.json') && !database[field]?.length;
+        const hiddenChat = parts.length === 5 && parts[0] === 'characters' && parts[2] === 'chats'
+            && parts[4] === 'metadata.json' && chats.get(parts[1]) === 0;
+        if (hiddenCharacter || hiddenCollection || hiddenChat) {
+            throw new Error('V1 목록은 비어 있지만 실제 데이터 파일이 남아 있습니다. 자동 이관을 중단했습니다. 원본을 보존하고 recover-save.bat(Windows) 등 세이브 복구 도구로 복구본을 먼저 만들어 주세요.');
+        }
+    }
+}
+
 async function planMigration(root, workspace) {
     const before = inventory(root, true);
     if (fs.existsSync(path.join(root, '.journal')) && fs.readdirSync(path.join(root, '.journal')).some(name => name.endsWith('.json'))) {
@@ -90,8 +107,10 @@ async function planMigration(root, workspace) {
         // behind recent message or settings writes. Decode canonical exports too
         // so cold-storage references are hydrated before planning V2 output.
         const canonical = fs.existsSync(path.join(root, 'settings/app.json'));
+        const canonicalDatabase = canonical ? legacy.exportLegacyDatabase() : null;
+        if (canonicalDatabase) assertNonemptyV1Catalogs(canonicalDatabase, before);
         const raw = canonical
-            ? Buffer.from(require('./utils.cjs').encodeRisuSaveLegacy(legacy.exportLegacyDatabase()))
+            ? Buffer.from(require('./utils.cjs').encodeRisuSaveLegacy(canonicalDatabase))
             : source.read('database/database.bin');
         const database = raw ? await decodeImportDatabase(raw, key => source.read(key)) : legacy.exportLegacyDatabase();
         assignImportIds(database);

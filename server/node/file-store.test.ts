@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,6 +11,7 @@ const {
     readVerifiedJson,
     recoverTransactions,
     checksum,
+    checksumFile,
 } = require('./file-store.cjs')
 const { resolveDataRoot } = require('./data-root.cjs')
 
@@ -23,7 +24,39 @@ function tempRoot() {
 }
 
 afterEach(() => {
+    vi.restoreAllMocks()
     for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+})
+
+describe('file checksums', () => {
+    it('hashes complete bytes across chunks, empty files and failed reads', () => {
+        const root = tempRoot(), file = path.join(root, 'asset')
+        const bytes = Buffer.alloc(2 * 1024 * 1024 + 17)
+        for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251
+        fs.writeFileSync(file, bytes)
+        expect(checksumFile(file)).toBe(checksum(bytes))
+        vi.spyOn(fs, 'readSync').mockImplementationOnce(() => { throw new Error('read failed') })
+        expect(() => checksumFile(file)).toThrow('read failed')
+        expect(() => checksumFile(path.join(root, 'missing'))).toThrow()
+        for (const value of [Buffer.from('small file'), Buffer.alloc(0), bytes]) {
+            fs.writeFileSync(file, value)
+            expect(checksumFile(file)).toBe(checksum(value))
+        }
+    })
+
+    it('keeps an active checksum isolated from a nested checksum', () => {
+        const root = tempRoot(), outer = path.join(root, 'outer'), inner = path.join(root, 'inner')
+        const outerBytes = Buffer.alloc(1024 * 1024 + 7, 31), innerBytes = Buffer.alloc(4000, 97)
+        fs.writeFileSync(outer, outerBytes)
+        fs.writeFileSync(inner, innerBytes)
+        const read = fs.readSync
+        vi.spyOn(fs, 'readSync').mockImplementationOnce((...args: Parameters<typeof fs.readSync>) => {
+            const count = read(...args)
+            expect(checksumFile(inner)).toBe(checksum(innerBytes))
+            return count
+        })
+        expect(checksumFile(outer)).toBe(checksum(outerBytes))
+    })
 })
 
 describe('resolveDataRoot', () => {

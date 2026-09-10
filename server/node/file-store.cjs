@@ -8,18 +8,25 @@ function checksum(data) {
     return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+// Synchronous callers can reuse one chunk without allocating it for every asset.
+// Take it out of the pool while reading so nested calls remain independent.
+let checksumBuffer;
+
 function checksumFile(filePath) {
     const hash = crypto.createHash('sha256');
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    const fd = fs.openSync(filePath, 'r');
+    const buffer = checksumBuffer || Buffer.allocUnsafe(1024 * 1024);
+    checksumBuffer = undefined;
+    let fd;
     try {
+        fd = fs.openSync(filePath, 'r');
         let bytesRead;
         do {
             bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
             if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
         } while (bytesRead > 0);
     } finally {
-        fs.closeSync(fd);
+        checksumBuffer = buffer;
+        if (fd !== undefined) fs.closeSync(fd);
     }
     return hash.digest('hex');
 }

@@ -10,6 +10,7 @@ const { fork } = require('child_process');
 const { resolveDataRoot } = require('./data-root.cjs');
 const volume = require('./v2-migration-volume.cjs');
 const { acquireSiblingLock } = require('./v2-migration-lock.cjs');
+const { checksumFile } = require('./file-store.cjs');
 
 function needsMigration(root) {
     if (!fs.existsSync(root)) return false;
@@ -32,14 +33,7 @@ function inventory(root, hashes = false, options = {}) {
             entries.push([relative, 'directory']);
             for (const name of fs.readdirSync(file).sort()) visit(path.join(relative, name));
         } else if (stat.isFile()) {
-            let hash;
-            if (hashes) {
-                const digest = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024);
-                const fd = fs.openSync(file, 'r');
-                try { let n; while ((n = fs.readSync(fd, buffer, 0, buffer.length, null))) digest.update(buffer.subarray(0, n)); }
-                finally { fs.closeSync(fd); }
-                hash = digest.digest('hex');
-            }
+            const hash = hashes ? checksumFile(file) : undefined;
             entries.push([relative, stat.size, stat.mtimeMs, hash]);
         } else throw new Error('Unsupported migration source file');
     }
@@ -232,11 +226,10 @@ async function beforeStartup(options = {}) {
                 res.end('{}'); return;
             }
             if (req.method === 'POST' && req.url === '/start' && state.phase === 'ready') {
-                state.phase = 'checking';
-                try { Object.assign(state, await (options.inspect || inspect)(root, backup)); }
-                catch (error) { state.phase = 'failed'; state.error = error.message; res.writeHead(400); res.end(JSON.stringify({ error: error.message })); return; }
-                if (!state.enoughSpace) { state.phase = 'ready'; res.writeHead(507); res.end(JSON.stringify(state)); return; }
-                state.phase = 'copy'; res.end('{}');
+                if (!state.enoughSpace) { res.writeHead(507); res.end(JSON.stringify(state)); return; }
+                // The locked worker rebuilds the plan and checks disk space.
+                // A second inspection here delays this response for large saves.
+                state.phase = 'checking'; res.end('{}');
                 (options.worker || launchWorker)(root, backup, phase => { state.phase = phase; }).then(() => {
                     state.phase = 'complete';
                     // Give the page one polling cycle to see completion before

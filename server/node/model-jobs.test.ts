@@ -321,12 +321,16 @@ describe('model-jobs', () => {
             headers: { 'risu-auth': AUTH_TOKEN },
         })
         expect(claimRes.status).toBe(409)
-        upstream.hang = false
-        await fetch(`${base}/api/model-jobs/${json.jobId}`, {
+        // Keep the upstream running until abort completes; otherwise it can
+        // finish naturally before DELETE and leave no aborted job to inspect.
+        const abortRes = await fetch(`${base}/api/model-jobs/${json.jobId}`, {
             method: 'DELETE',
             headers: { 'risu-auth': AUTH_TOKEN },
         })
+        expect(abortRes.status).toBe(200)
+        expect(await abortRes.json()).toMatchObject({ aborted: true })
         await waitForStatus(base, json.jobId, ['aborted'])
+        upstream.hang = false
     })
 
     it('server restart marks running jobs failed', async () => {

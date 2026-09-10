@@ -78,19 +78,17 @@
                     {:else}
                         <div class="chat-module-scopes">
                             <div class="chat-module-scope">
-                                <span>{copy.global}</span>
                                 <button type="button" class="chat-module-toggle" class:active={globalEnabled}
                                     aria-label={module.name + ': ' + copy.global} aria-pressed={globalEnabled}
                                     title={copy.globalHint} onclick={() => toggleModule(moduleId, 'global')}>
-                                    <GlobeIcon size={24}/>
+                                    <GlobeIcon size={19.2}/>
                                 </button>
                             </div>
                             <div class="chat-module-scope">
-                                <span>{copy.chat}</span>
                                 <button type="button" class="chat-module-toggle" class:active={chatEnabled}
                                     aria-label={module.name + ': ' + copy.chat} aria-pressed={chatEnabled} disabled={!chat}
                                     title={chat ? copy.chatHint : copy.noChat} onclick={() => toggleModule(moduleId, 'chat')}>
-                                    <MessageSquareIcon size={24}/>
+                                    <MessageSquareIcon size={19.2}/>
                                 </button>
                             </div>
                         </div>
@@ -107,9 +105,9 @@
     .chat-module-name { display: flex; align-items: center; gap: .4rem; }
     .chat-module-copy p { margin: .3rem 0 0; font-size: .85rem; color: var(--color-textcolor2); }
     .chat-module-copy .chat-module-inherited { color: var(--color-info); }
-    .chat-module-scopes { display: flex; flex: 0 0 auto; gap: .65rem; margin-left: auto; }
-    .chat-module-scope { display: flex; flex-direction: column; align-items: center; gap: .35rem; font-size: .8rem; font-weight: 600; }
-    .chat-module-toggle { display: flex; align-items: center; justify-content: center; width: 3.5rem; height: 3.5rem; flex: 0 0 auto; padding: .4rem; border: 1px solid var(--color-darkborderc); border-radius: .65rem; color: var(--color-textcolor2); background: var(--color-darkbg); cursor: pointer; }
+    .chat-module-scopes { display: flex; flex: 0 0 auto; gap: .5rem; margin-left: auto; }
+    .chat-module-scope { display: flex; align-items: center; }
+    .chat-module-toggle { display: flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; flex: 0 0 auto; padding: 0; border: 1px solid var(--color-darkborderc); border-radius: .4rem; color: var(--color-textcolor2); background: var(--color-darkbg); cursor: pointer; }
     .chat-module-toggle.active { color: var(--color-accenttext); background: var(--color-primary); border-color: var(--color-primary); }
     .chat-module-toggle:hover { border-color: var(--color-info); }
     .chat-module-toggle:focus-visible { outline: 2px solid var(--color-info); outline-offset: 2px; }

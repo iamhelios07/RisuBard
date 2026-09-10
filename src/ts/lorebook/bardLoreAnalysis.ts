@@ -63,7 +63,7 @@ export interface BardLoreAnalysisQualityReport {
 }
 
 export class BardLoreAnalysisBudgetError extends Error {
-    constructor(message: string) {
+    constructor(message: string, readonly details?: { entryId: string; entryName: string; inputTokens: number; limit: number }) {
         super(message)
         this.name = 'BardLoreAnalysisBudgetError'
     }
@@ -430,7 +430,10 @@ export async function planBardLoreAnalysisBatches(
             candidateTokens = await measure(candidate)
         }
         if (candidateTokens > maxTokens) {
-            throw new BardLoreAnalysisBudgetError('A Grimoire analysis batch exceeds the configured input limit.')
+            throw new BardLoreAnalysisBudgetError(
+                `Grimoire entry "${entry.comment || entry.key || entry.id}" requires ${candidateTokens} input tokens; the configured limit is ${maxTokens}.`,
+                { entryId: entry.id, entryName: entry.comment || entry.key || entry.id, inputTokens: candidateTokens, limit: maxTokens },
+            )
         }
         current = candidate
         currentTokens = candidateTokens

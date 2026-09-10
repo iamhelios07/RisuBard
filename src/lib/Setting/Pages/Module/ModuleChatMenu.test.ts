@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { mount, tick, unmount } from 'svelte'
 import { get } from 'svelte/store'
 import ModuleChatMenu from './ModuleChatMenu.svelte'
@@ -87,6 +88,23 @@ describe('chat module manager', () => {
         expect(DBState.db.characters[0].modules).toEqual(['legacy'])
         expect(requestImmediateSave).toHaveBeenCalledTimes(4)
         expect(get(ReloadGUIPointer)).toBe(4)
+    })
+
+    test('renders compact icon-only scope controls', async () => {
+        await openMenu()
+        const source = readFileSync('src/lib/Setting/Pages/Module/ModuleChatMenu.svelte', 'utf8')
+        const scopes = document.querySelectorAll('.chat-module-scope')
+        expect(scopes).toHaveLength(2)
+        expect(document.querySelector('.chat-module-scope > span')).toBeNull()
+        for (const scope of scopes) {
+            const button = scope.querySelector<HTMLButtonElement>('.chat-module-toggle')!
+            const icon = button.querySelector('svg')!
+            expect(button.textContent).toBe('')
+            expect(button.getAttribute('aria-label')).toBeTruthy()
+            expect(icon.getAttribute('width')).toBe('19.2')
+            expect(icon.getAttribute('height')).toBe('19.2')
+        }
+        expect(source).toMatch(/\.chat-module-toggle\s*\{[^}]*width:\s*1\.5rem;[^}]*height:\s*1\.5rem;/)
     })
 
     test('initializes missing chat assignments and ignores right-click activation', async () => {

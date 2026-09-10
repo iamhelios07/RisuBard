@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { GripVerticalIcon, ScissorsIcon, Trash2Icon } from '@lucide/svelte'
     import { language } from 'src/lang'
     import { parseCbsConditionView, summarizeCbsCondition, type CbsConditionExpression } from 'src/ts/gui/cbsConditionView'
     import type { CbsVariableContext } from 'src/ts/gui/cbsVariableEditor'
@@ -6,7 +7,7 @@
     import { resizeHandle } from 'src/ts/gui/resizeHandle'
     import CbsVariableList from './CbsVariableList.svelte'
 
-    let { value, onInput, onblur, onkeydown, variableContext, variableLabels, switchVariables = [], previewSegments = [], showVariableSidebar = true, onSelectionChange }: {
+    let { value, onInput, onblur, onkeydown, variableContext, variableLabels, switchVariables = [], previewSegments = [], showVariableSidebar = true, onSelectionChange, allowBlockActions = false, scrollTop = 0, onScrollTopChange }: {
         value: string
         onInput: (value: string) => void
         onblur?: () => void
@@ -17,6 +18,9 @@
         previewSegments?: Array<{ text: string; state: 'neutral' | 'active' | 'inactive' }>
         showVariableSidebar?: boolean
         onSelectionChange?: (selection: { start: number; end: number }) => void
+        allowBlockActions?: boolean
+        scrollTop?: number
+        onScrollTopChange?: (scrollTop: number) => void
     } = $props()
 
     let documentValue = $state('')
@@ -27,6 +31,8 @@
     const variablesOpen = $derived(showVariableSidebar && (variablesPreference ?? containerWidth >= 360))
     let layoutElement: HTMLElement | undefined = $state()
     let rootElement: HTMLElement | undefined = $state()
+    let documentElement: HTMLElement | undefined = $state()
+    let draggedRange: { from: number; to: number } | undefined
     const labels = $derived(language.cbsEditor)
     const previewRanges = $derived.by(() => {
         let from = 0
@@ -44,17 +50,31 @@
         }
     })
 
-    type Block = { index: number; children: Block[] }
+    type Block = { index: number; endIndex?: number; children: Block[] }
     const blocks = $derived.by(() => {
         const root: Block[] = []
-        const stack = [root]
+        const childStack = [root]
+        const conditionStack: Block[] = []
         view.parts.forEach((part, index) => {
-            if (part.kind === 'end') { if (stack.length > 1) stack.pop(); return }
+            if (part.kind === 'end') {
+                conditionStack.pop()!.endIndex = index
+                if (childStack.length > 1) childStack.pop()
+                return
+            }
             const block: Block = { index, children: [] }
-            stack[stack.length - 1].push(block)
-            if (part.kind === 'condition') stack.push(block.children)
+            childStack[childStack.length - 1].push(block)
+            if (part.kind === 'condition') {
+                conditionStack.push(block)
+                childStack.push(block.children)
+            }
         })
         return root
+    })
+
+    $effect(() => {
+        const element = documentElement
+        const position = scrollTop
+        if (element && element.scrollTop !== position) element.scrollTop = position
     })
 
     function switchState(node: CbsConditionExpression): string | undefined {
@@ -84,6 +104,77 @@
         onInput(documentValue)
     }
 
+    function blockRange(block: Block): { from: number; to: number } {
+        const opening = view.parts[block.index]
+        const closing = block.endIndex === undefined ? opening : view.parts[block.endIndex]
+        return { from: opening.from, to: closing.to }
+    }
+
+    function replaceRange(from: number, to: number, replacement = '') {
+        documentValue = documentValue.slice(0, from) + replacement + documentValue.slice(to)
+        view = parseCbsConditionView(documentValue)
+        onInput(documentValue)
+    }
+
+    async function cutBlock(block: Block, event: MouseEvent) {
+        event.preventDefault()
+        event.stopPropagation()
+        const range = blockRange(block)
+        const source = documentValue.slice(range.from, range.to)
+        try {
+            if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source)
+            else {
+                const field = document.createElement('textarea')
+                field.value = source
+                field.style.position = 'fixed'
+                field.style.opacity = '0'
+                document.body.append(field)
+                field.select()
+                document.execCommand('copy')
+                field.remove()
+            }
+        } catch {
+            return
+        }
+        replaceRange(range.from, range.to)
+    }
+
+    function deleteBlock(block: Block, event: MouseEvent) {
+        event.preventDefault()
+        event.stopPropagation()
+        const range = blockRange(block)
+        replaceRange(range.from, range.to)
+    }
+
+    function startBlockDrag(block: Block, event: DragEvent) {
+        if (!allowBlockActions) return
+        event.stopPropagation()
+        draggedRange = blockRange(block)
+        event.dataTransfer?.setData('text/plain', documentValue.slice(draggedRange.from, draggedRange.to))
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+    }
+
+    function dropBlock(block: Block, event: DragEvent) {
+        if (!draggedRange) return
+        event.preventDefault()
+        event.stopPropagation()
+        const source = draggedRange
+        const target = blockRange(block)
+        draggedRange = undefined
+        if (target.from >= source.from && target.to <= source.to) return
+
+        const rect = event.currentTarget instanceof HTMLElement
+            ? event.currentTarget.getBoundingClientRect()
+            : { top: 0, height: 0 }
+        const insertAt = event.clientY < rect.top + rect.height / 2 ? target.from : target.to
+        const moving = documentValue.slice(source.from, source.to)
+        const without = documentValue.slice(0, source.from) + documentValue.slice(source.to)
+        const adjustedInsert = insertAt > source.to ? insertAt - (source.to - source.from) : insertAt
+        documentValue = without.slice(0, adjustedInsert) + moving + without.slice(adjustedInsert)
+        view = parseCbsConditionView(documentValue)
+        onInput(documentValue)
+    }
+
     function finishEdit() {
         view = parseCbsConditionView(documentValue)
         onblur?.()
@@ -108,6 +199,22 @@
             }
             field.focus()
             field.setSelectionRange(start - part.from, end - part.from)
+            return
+        }
+
+        const conditionParts = rootElement?.querySelectorAll<HTMLElement>('[data-cbs-condition-part]')
+        if (!conditionParts) return
+        for (const element of conditionParts) {
+            const part = view.parts[Number(element.dataset.cbsPartIndex)]
+            if (!part || part.kind !== 'condition' || start < part.from || end > part.to) continue
+            let parent: HTMLElement | null = element
+            while (parent && parent !== rootElement) {
+                if (parent instanceof HTMLDetailsElement) parent.open = true
+                parent = parent.parentElement
+            }
+            const heading = element.querySelector<HTMLElement>('[data-cbs-condition-heading]')
+            heading?.focus({ preventScroll: true })
+            element.scrollIntoView?.({ block: 'center', inline: 'nearest' })
             return
         }
     }
@@ -160,7 +267,11 @@
         {@const index = block.index}
         {@const part = view.parts[index]}
         {@const source = documentValue.slice(part.from, part.to)}
-        <div class="part">
+        <div
+            class="part"
+            data-cbs-part-index={index}
+            data-cbs-condition-part={part.kind === 'condition' ? '' : undefined}
+        >
             {#if part.kind === 'text'}
                 {#if source.trim() || part.depth > 0 || part.from === part.to}
                     <textarea
@@ -186,10 +297,30 @@
                     ...summary.warnings.map(warning => labels.extraArguments.replace('{name}', warning.name).replace('{actual}', String(warning.actual)).replace('{expected}', String(warning.expected))),
                     ...(expressionHasRaw(summary.expression) ? [labels.unsupportedExpression] : []),
                 ].join('\n')}
-                <details class="condition-block" data-cbs-block open>
-                    <summary class="block-heading" aria-label={summary.text}>
+                <details
+                    class="condition-block"
+                    data-cbs-block
+                    open
+                    draggable={allowBlockActions}
+                    ondragstart={(event) => startBlockDrag(block, event)}
+                    ondragend={() => draggedRange = undefined}
+                    ondragover={(event) => { if (draggedRange) event.preventDefault() }}
+                    ondrop={(event) => dropBlock(block, event)}
+                >
+                    <summary class="block-heading" aria-label={summary.text} data-cbs-condition-heading tabindex="-1">
+                        {#if allowBlockActions}<GripVerticalIcon size={14} class="block-drag-handle" />{/if}
                         <span class="condition-label">{labels.condition}</span>
                         <span class="condition-expression" data-cbs-summary>{@render renderExpression(summary.expression)}</span>
+                        {#if allowBlockActions}
+                            <span class="condition-actions">
+                                <button type="button" data-cbs-cut-condition aria-label={labels.cutCondition} title={labels.cutCondition} onclick={(event) => cutBlock(block, event)}>
+                                    <ScissorsIcon size={14} />
+                                </button>
+                                <button type="button" data-cbs-delete-condition aria-label={labels.deleteCondition} title={labels.deleteCondition} onclick={(event) => deleteBlock(block, event)}>
+                                    <Trash2Icon size={14} />
+                                </button>
+                            </span>
+                        {/if}
                     </summary>
                     <div class="block-body">
                         <div class="condition-tools">
@@ -226,7 +357,12 @@
         </button>{/if}
     </div>
     <div class="view-layout" class:variables-open={variablesOpen} bind:this={layoutElement}>
-    <div class="cbs-document" data-cbs-document>
+    <div
+        class="cbs-document"
+        data-cbs-document
+        bind:this={documentElement}
+        onscroll={(event) => onScrollTopChange?.(event.currentTarget.scrollTop)}
+    >
     {@render renderBlocks(blocks)}
     </div>
     {#if showVariableSidebar}<button type="button" class="variable-splitter" data-cbs-variable-splitter hidden={!variablesOpen}
@@ -252,6 +388,8 @@
     .variable-splitter:hover, .variable-splitter:focus-visible, .variable-splitter:global([data-resizing]) { background: color-mix(in srgb, var(--color-borderc) 45%, transparent); outline: none; }
     .part { min-width: 0; }
     .condition-block { margin: .85rem 0; border: 1px solid var(--color-borderc); border-bottom-width: 3px; border-left: 3px solid var(--color-primary); border-radius: .5rem; background: color-mix(in srgb, var(--color-primary) 5%, var(--color-darkbg)); }
+    .condition-block[draggable='true'] { cursor: grab; }
+    .condition-block[draggable='true']:active { cursor: grabbing; }
     .block-heading { min-height: 2.75rem; align-items: center; padding: .5rem .75rem; background: color-mix(in srgb, var(--color-primary) 12%, var(--color-darkbg)); border-radius: .35rem; }
     .condition-block[open] > .block-heading { border-bottom: 1px solid var(--color-darkborderc); border-radius: .35rem .35rem 0 0; }
     .block-heading:hover { background: color-mix(in srgb, var(--color-primary) 20%, var(--color-darkbg)); }
@@ -267,6 +405,12 @@
     .condition-label { flex-shrink: 0; color: var(--color-textcolor2); font-size: .75rem; font-weight: 600; }
     .condition-source { font-family: ui-monospace, monospace; font-size: .75rem; }
     .condition-expression { display: flex; flex: 1; min-width: 0; align-items: center; }
+    .block-heading :global(.block-drag-handle) { flex-shrink: 0; color: var(--color-textcolor2); opacity: .7; }
+    .condition-actions { display: inline-flex; flex-shrink: 0; align-items: center; gap: .15rem; margin-left: auto; }
+    .condition-actions button { display: grid; width: 1.75rem; height: 1.75rem; place-content: center; border: 1px solid transparent; border-radius: .3rem; color: var(--color-textcolor2); background: transparent; cursor: pointer; }
+    .condition-actions button:hover { border-color: var(--color-darkborderc); color: var(--color-textcolor); background: var(--color-darkbutton); }
+    .condition-actions button[data-cbs-delete-condition]:hover { color: var(--color-danger); }
+    .condition-actions button:focus-visible, [data-cbs-condition-heading]:focus-visible { outline: 2px solid var(--color-borderc); outline-offset: 1px; }
     .logical-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .3rem; min-width: 0; max-width: 100%; }
     .logical-group.nested { padding: .2rem .3rem; border: 1px solid color-mix(in srgb, var(--color-borderc) 65%, var(--color-darkborderc)); border-radius: .4rem; background: color-mix(in srgb, var(--color-selected) 18%, var(--color-darkbg)); }
     .condition-clause, .expression-leaf { min-width: 0; max-width: 100%; padding: .15rem .4rem; border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-darkborderc)); border-radius: .3rem; background: color-mix(in srgb, var(--color-primary) 10%, var(--color-darkbg)); overflow-wrap: anywhere; }

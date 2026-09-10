@@ -368,6 +368,29 @@ export interface PromptV2PreviewStorage {
 export type PromptV2EditorMode = 'source' | 'visual'
 const editorModeStorageKey = 'risubard:prompt-v2-editor-mode:v1'
 
+export interface PromptV2WorkspaceSession {
+    mode: 'prompts' | 'toggles'
+    selectedIndex: number
+    blockScrollTops: Record<number, number>
+    toggleScrollTop: number
+}
+
+const promptV2WorkspaceSessions = new Map<string, PromptV2WorkspaceSession>()
+
+export function loadPromptV2WorkspaceSession(presetId: string): PromptV2WorkspaceSession {
+    const saved = promptV2WorkspaceSessions.get(presetId)
+    if (!saved) return { mode: 'prompts', selectedIndex: 0, blockScrollTops: {}, toggleScrollTop: 0 }
+    return { ...saved, blockScrollTops: { ...saved.blockScrollTops } }
+}
+
+export function savePromptV2WorkspaceSession(presetId: string, session: PromptV2WorkspaceSession): void {
+    if (!presetId) return
+    promptV2WorkspaceSessions.set(presetId, {
+        ...session,
+        blockScrollTops: { ...session.blockScrollTops },
+    })
+}
+
 export function loadPromptV2EditorMode(storage?: PromptV2PreviewStorage): PromptV2EditorMode {
     if (!storage) {
         try { storage = typeof localStorage === 'undefined' ? undefined : localStorage } catch {}
@@ -473,6 +496,50 @@ export function setPromptV2TextSource(item: PromptItem, source: string): void {
     ) {
         item.innerFormat = source
     }
+}
+
+export interface PromptV2ToggleUsage {
+    blockIndex: number
+    blockName: string
+    line: number
+    start: number
+    end: number
+    preview: string
+}
+
+export function findPromptV2ToggleUsages(
+    items: PromptItem[],
+    key: string,
+): PromptV2ToggleUsage[] {
+    if (!key) return []
+    const markerPrefix = '{{getglobalvar::'
+    const marker = `${markerPrefix}${key}}}`
+    const usages: PromptV2ToggleUsage[] = []
+
+    items.forEach((item, blockIndex) => {
+        const textSource = getPromptV2TextSource(item)
+        if (!textSource) return
+        const body = parsePromptV2Text(textSource.source).body
+        let markerStart = body.indexOf(marker)
+        while (markerStart >= 0) {
+            const start = markerStart + markerPrefix.length
+            const end = start + key.length
+            const contextLength = Math.max(0, 50 - key.length)
+            const previewStart = Math.max(0, start - Math.floor(contextLength / 2))
+            const previewEnd = Math.min(body.length, end + Math.ceil(contextLength / 2))
+            usages.push({
+                blockIndex,
+                blockName: item.name?.trim() || String(blockIndex + 1),
+                line: body.slice(0, start).split(/\r\n|\r|\n/).length,
+                start,
+                end,
+                preview: `${previewStart > 0 ? '…' : ''}${body.slice(previewStart, previewEnd).replace(/\s+/g, ' ')}${previewEnd < body.length ? '…' : ''}`,
+            })
+            markerStart = body.indexOf(marker, markerStart + marker.length)
+        }
+    })
+
+    return usages
 }
 
 function promptV2BodySearchExpression(search: string): RegExp | null {

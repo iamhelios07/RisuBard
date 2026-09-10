@@ -42,12 +42,16 @@
         item,
         definitions,
         previewValues,
+        scrollTop = 0,
+        onScrollTopChange = () => {},
         onReplace,
         onOpenToggleSetup,
     }: {
         item?: PromptItem
         definitions: PromptV2ToggleDefinition[]
         previewValues: Record<string, string>
+        scrollTop?: number
+        onScrollTopChange?: (scrollTop: number) => void
         onReplace: (item: PromptItem) => void
         onOpenToggleSetup: () => void
     } = $props()
@@ -74,6 +78,7 @@
     let pendingVisualItem: PromptItem | undefined
     let pendingVisualBody: string | undefined
     let pendingVisualActivation: PromptV2Activation | null = null
+    let currentScrollTop = $state(0)
 
     const visualBodyCommitDelay = 750
 
@@ -88,6 +93,17 @@
         revealTextareaMatch(bodyField, match)
         if (bodyPreviewElement) bodyPreviewElement.scrollTop = bodyField.scrollTop
         lastSearch = { item, query }
+    }
+
+    export async function revealBodyRange(start: number, end: number) {
+        await tick()
+        if (editorMode === 'source') {
+            if (!bodyField) return
+            revealTextareaMatch(bodyField, { start, end })
+            if (bodyPreviewElement) bodyPreviewElement.scrollTop = bodyField.scrollTop
+        } else {
+            visualBodyField?.focusSelection(start, end)
+        }
     }
 
     export function replaceCurrentBodyMatch(search: string, replacement: string): boolean {
@@ -141,6 +157,19 @@
             || definition.key.toLocaleLowerCase().includes(query)
             || definition.group?.toLocaleLowerCase().includes(query),
         )
+    })
+
+    $effect(() => {
+        currentScrollTop = scrollTop
+    })
+
+    $effect(() => {
+        const field = bodyField
+        const position = currentScrollTop
+        if (field && field.scrollTop !== position) {
+            field.scrollTop = position
+            if (bodyPreviewElement) bodyPreviewElement.scrollTop = position
+        }
     })
 
     $effect(() => {
@@ -404,10 +433,13 @@
     }
 
     function syncBodyPreviewScroll(event: Event) {
-        if (!bodyPreviewElement) return
         const field = event.currentTarget as HTMLTextAreaElement
-        bodyPreviewElement.scrollTop = field.scrollTop
-        bodyPreviewElement.scrollLeft = field.scrollLeft
+        currentScrollTop = field.scrollTop
+        onScrollTopChange(field.scrollTop)
+        if (bodyPreviewElement) {
+            bodyPreviewElement.scrollTop = field.scrollTop
+            bodyPreviewElement.scrollLeft = field.scrollLeft
+        }
     }
 </script>
 
@@ -770,6 +802,12 @@
                                 switchVariables={definitions.filter(definition => definition.type === 'switch').map(definition => definition.key)}
                                 previewSegments={bodyPreviewSegments}
                                 showVariableSidebar={false}
+                                allowBlockActions
+                                scrollTop={currentScrollTop}
+                                onScrollTopChange={(position) => {
+                                    currentScrollTop = position
+                                    onScrollTopChange(position)
+                                }}
                                 onSelectionChange={updateBodySelection}
                             />
                         </div>
@@ -779,7 +817,7 @@
                             class:prompt-body-editor--active={previewState === true}
                             class:prompt-body-editor--inactive={previewState === false}
                         >
-                            {#if hasBodyPreview}
+                            {#if hasBodyPreview && !bodyFieldFocused}
                                 <pre class="prompt-body-preview" bind:this={bodyPreviewElement} aria-hidden="true">{#each bodyPreviewSegments as segment}<span
                                     class:prompt-body-preview-text--active={segment.state === 'active'}
                                     class:prompt-body-preview-text--inactive={segment.state === 'inactive'}

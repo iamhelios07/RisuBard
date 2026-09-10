@@ -16,13 +16,17 @@
     import {
         clearPromptV2PreviewState,
         createPromptV2PreviewValues,
+        findPromptV2ToggleUsages,
         getPromptV2TextSource,
         loadPromptV2PreviewState,
+        loadPromptV2WorkspaceSession,
         parsePromptV2Text,
         parsePromptV2ToggleTree,
         promptV2PreviewDefaultValue,
         replacePromptV2BodyMatches,
         savePromptV2PreviewState,
+        savePromptV2WorkspaceSession,
+        type PromptV2ToggleUsage,
     } from 'src/ts/promptV2'
     import ShButton from 'src/lib/UI/GUI/ShButton.svelte'
     import PromptV2BlockList from './PromptV2BlockList.svelte'
@@ -37,6 +41,9 @@
     let compactPane = $state<'list' | 'editor' | 'preview'>('editor')
     let previewValues = $state<Record<string, string>>({})
     let hydratedPreviewScope = $state('')
+    let hydratedWorkspaceScope = $state('')
+    let blockScrollTops = $state<Record<number, number>>({})
+    let toggleScrollTop = $state(0)
     let blockEditor: PromptV2BlockEditor | undefined = $state()
 
     async function findInSelectedBlock(query: string) {
@@ -59,6 +66,12 @@
         const activation = parsePromptV2Text(source.source).activation
         return new Set(activation?.conditions.map((condition) => condition.key) ?? [])
     })
+    const toggleUsages = $derived.by(() => Object.fromEntries(
+        toggleTree.definitions.map((definition) => [
+            definition.key,
+            findPromptV2ToggleUsages(promptItems, definition.key),
+        ]),
+    ))
 
     $effect(() => {
         if (promptItems.length === 0) {
@@ -66,6 +79,26 @@
         } else if (selectedIndex < 0 || selectedIndex >= promptItems.length) {
             selectedIndex = Math.max(0, promptItems.length - 1)
         }
+    })
+
+    $effect(() => {
+        if (hydratedWorkspaceScope === previewPresetId) return
+        const session = loadPromptV2WorkspaceSession(previewPresetId)
+        mode = session.mode
+        selectedIndex = session.selectedIndex
+        blockScrollTops = session.blockScrollTops
+        toggleScrollTop = session.toggleScrollTop
+        hydratedWorkspaceScope = previewPresetId
+    })
+
+    $effect(() => {
+        if (!hydratedWorkspaceScope || hydratedWorkspaceScope !== previewPresetId) return
+        savePromptV2WorkspaceSession(previewPresetId, {
+            mode,
+            selectedIndex,
+            blockScrollTops,
+            toggleScrollTop,
+        })
     })
 
     function previewStorage(): Storage | undefined {
@@ -192,6 +225,19 @@
         mode = nextMode
     }
 
+    async function openToggleUsage(usage: PromptV2ToggleUsage) {
+        mode = 'prompts'
+        selectedIndex = usage.blockIndex
+        compactPane = 'editor'
+        await tick()
+        blockEditor?.revealBodyRange(usage.start, usage.end)
+    }
+
+    function rememberBlockScroll(position: number) {
+        if (selectedIndex < 0) return
+        blockScrollTops = { ...blockScrollTops, [selectedIndex]: position }
+    }
+
     function replaceOneMatch(search: string, replacement: string) {
         if (blockEditor?.replaceCurrentBodyMatch(search, replacement)) return
         const result = replacePromptV2BodyMatches(
@@ -296,7 +342,12 @@
                         onReplaceAll={replaceAllMatches}
                     />
                 {:else}
-                    <PromptV2ToggleEditor view="library" bind:template={DBState.db.customPromptTemplateToggle} />
+                    <PromptV2ToggleEditor
+                        view="library"
+                        bind:template={DBState.db.customPromptTemplateToggle}
+                        usages={toggleUsages}
+                        onOpenUsage={openToggleUsage}
+                    />
                 {/if}
             </div>
         {/if}
@@ -308,11 +359,18 @@
                     item={selectedItem}
                     definitions={toggleTree.definitions}
                     {previewValues}
+                    scrollTop={blockScrollTops[selectedIndex] ?? 0}
+                    onScrollTopChange={rememberBlockScroll}
                     onReplace={replaceSelected}
                     onOpenToggleSetup={openToggleSetup}
                 />
             {:else}
-                <PromptV2ToggleEditor view="source" bind:template={DBState.db.customPromptTemplateToggle} />
+                <PromptV2ToggleEditor
+                    view="source"
+                    bind:template={DBState.db.customPromptTemplateToggle}
+                    scrollTop={toggleScrollTop}
+                    onScrollTopChange={(position) => toggleScrollTop = position}
+                />
             {/if}
         </div>
 

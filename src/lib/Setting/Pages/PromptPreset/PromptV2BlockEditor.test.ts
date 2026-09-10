@@ -67,6 +67,52 @@ describe('Prompt V2 block visual editor', () => {
         expect(onReplace.mock.lastCall?.[0].text).toBe('Alpha Beta ALPHA')
     })
 
+    it('reveals an exact body range and restores source and visual scroll positions', async () => {
+        const item: PromptItem = {
+            type: 'plain', type2: 'normal', role: 'system', name: 'Block',
+            text: 'First line\nUse {{getglobalvar::toggle_enabled}} here.\nLast line',
+        }
+        const onScrollTopChange = vi.fn()
+        mounted = mount(PromptV2BlockEditor, {
+            target: document.body,
+            props: {
+                item,
+                definitions: [],
+                previewValues: {},
+                scrollTop: 76,
+                onScrollTopChange,
+                onReplace: vi.fn(),
+                onOpenToggleSetup: vi.fn(),
+            },
+        })
+        await tick()
+        const editor = mounted as unknown as {
+            revealBodyRange(start: number, end: number): Promise<void>
+        }
+        const start = item.text.indexOf('toggle_enabled')
+        const body = document.querySelector<HTMLTextAreaElement>('.prompt-body-field')!
+        expect(body.scrollTop).toBe(76)
+
+        await editor.revealBodyRange(start, start + 'toggle_enabled'.length)
+        expect(body.selectionStart).toBe(start)
+        expect(body.selectionEnd).toBe(start + 'toggle_enabled'.length)
+
+        body.scrollTop = 118
+        body.dispatchEvent(new Event('scroll'))
+        expect(onScrollTopChange).toHaveBeenLastCalledWith(118)
+
+        document.querySelectorAll<HTMLButtonElement>('.editor-mode-tabs button')[1].click()
+        await tick()
+        const visual = document.querySelector<HTMLElement>('[data-cbs-document]')!
+        expect(visual.scrollTop).toBe(118)
+        await editor.revealBodyRange(start, start + 'toggle_enabled'.length)
+        expect(document.querySelector('.prompt-body-field')).toBeNull()
+        expect(document.querySelector('[data-cbs-document]')).not.toBeNull()
+        visual.scrollTop = 164
+        visual.dispatchEvent(new Event('scroll'))
+        expect(onScrollTopChange).toHaveBeenLastCalledWith(164)
+    })
+
     it('debounces visual body commits and flushes the latest text on blur', async () => {
         vi.useFakeTimers()
         const item: PromptItem = {
@@ -200,11 +246,13 @@ describe('Prompt V2 block visual editor', () => {
         await tick()
         const body = document.querySelector<HTMLTextAreaElement>('.prompt-body-field')!
         expect(body.classList.contains('prompt-body-field--preview')).toBe(true)
+        expect(document.querySelector('.prompt-body-preview')).not.toBeNull()
 
         body.focus()
         await tick()
 
         expect(body.classList.contains('prompt-body-field--preview')).toBe(false)
+        expect(document.querySelector('.prompt-body-preview')).toBeNull()
     })
 
     it('wraps the selected visual text with a condition and remembers the mode', async () => {

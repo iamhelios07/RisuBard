@@ -6,7 +6,9 @@ import {
     createPromptV2BodyPreviewSegments,
     createPromptV2PreviewValues,
     evaluatePromptV2Activation,
+    findPromptV2ToggleUsages,
     getPromptV2TextSource,
+    loadPromptV2WorkspaceSession,
     loadPromptV2PreviewState,
     parsePromptV2Text,
     parsePromptV2ToggleTree,
@@ -14,6 +16,7 @@ import {
     loadPromptV2EditorMode,
     savePromptV2EditorMode,
     savePromptV2PreviewState,
+    savePromptV2WorkspaceSession,
     countPromptV2BodyMatches,
     replacePromptV2BodyMatches,
     type PromptV2Activation,
@@ -135,6 +138,61 @@ describe('Prompt V2 compatibility compiler', () => {
         expect(loadPromptV2EditorMode(storage)).toBe('visual')
         values.set('risubard:prompt-v2-editor-mode:v1', 'broken')
         expect(loadPromptV2EditorMode(storage)).toBe('source')
+    })
+
+    test('finds exact toggle references with block, line, range, and a compact preview', () => {
+        const items = [
+            {
+                type: 'plain', type2: 'normal', role: 'system', name: 'System',
+                text: [
+                    'Unrelated first line',
+                    'Prefix {{getglobalvar::toggle_enabled}} suffix with a deliberately long tail for clipping.',
+                    '{{getglobalvar::toggle_enabled_extra}}',
+                    'Again {{getglobalvar::toggle_enabled}}.',
+                ].join('\n'),
+            },
+            { type: 'authornote', name: 'Author note', innerFormat: 'Use {{getglobalvar::toggle_enabled}} here.' },
+            { type: 'chat', name: 'History', rangeStart: -1000, rangeEnd: 'end' },
+        ] as Parameters<typeof findPromptV2ToggleUsages>[0]
+
+        const usages = findPromptV2ToggleUsages(items, 'toggle_enabled')
+
+        expect(usages).toHaveLength(3)
+        expect(usages.map(({ blockIndex, blockName, line }) => ({ blockIndex, blockName, line }))).toEqual([
+            { blockIndex: 0, blockName: 'System', line: 2 },
+            { blockIndex: 0, blockName: 'System', line: 4 },
+            { blockIndex: 1, blockName: 'Author note', line: 1 },
+        ])
+        expect(usages.every(usage => usage.preview.includes('toggle_enabled'))).toBe(true)
+        expect(usages.every(usage => usage.preview.length <= 52)).toBe(true)
+        const firstBody = parsePromptV2Text(getPromptV2TextSource(items[0])?.source ?? '').body
+        expect(firstBody.slice(usages[0].start, usages[0].end)).toBe('toggle_enabled')
+    })
+
+    test('keeps transient Prompt V2 workspace positions isolated by preset', () => {
+        savePromptV2WorkspaceSession('preset-a', {
+            mode: 'toggles',
+            selectedIndex: 3,
+            blockScrollTops: { 3: 240 },
+            toggleScrollTop: 120,
+        })
+
+        const restored = loadPromptV2WorkspaceSession('preset-a')
+        expect(restored).toEqual({
+            mode: 'toggles',
+            selectedIndex: 3,
+            blockScrollTops: { 3: 240 },
+            toggleScrollTop: 120,
+        })
+        expect(loadPromptV2WorkspaceSession('preset-b')).toEqual({
+            mode: 'prompts',
+            selectedIndex: 0,
+            blockScrollTops: {},
+            toggleScrollTop: 0,
+        })
+
+        restored.blockScrollTops[3] = 999
+        expect(loadPromptV2WorkspaceSession('preset-a').blockScrollTops[3]).toBe(240)
     })
 
     test('round-trips AND conditions without adding preset schema fields', () => {

@@ -1,6 +1,6 @@
 'use strict';
 
-// Offline V2 recovery. Source files are only read; no storage constructor opens them.
+// Offline V1/V2 recovery. Source files are only read; storage constructors open only the copy.
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -16,6 +16,85 @@ function inside(parent, child) {
     return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const CATALOGS = ['settings/entity-order.json', 'index/sidebar.json'];
+function ordered(items, lists) {
+    const ranks = new Map();
+    for (const list of lists) if (Array.isArray(list)) for (const id of list) if (typeof id === 'string' && !ranks.has(id)) ranks.set(id, ranks.size);
+    return items.sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
+}
+
+async function convertV1Copy(candidate, output, report) {
+    for (const file of ['settings/app.json', 'secrets/credentials.json']) {
+        const value = readVerifiedJson(candidate, file);
+        if (!object(value) || value.schemaVersion !== 1) throw new Error(`필수 V1 설정을 검증하지 못했습니다: ${file}`);
+    }
+    const validManifest = value => object(value) && value.schemaVersion === 1 && object(value.entries)
+        && Object.values(value.entries).every(entry => object(entry) && /^[a-f0-9]{64}$/.test(entry.object)
+            && Number.isSafeInteger(entry.size) && entry.size >= 0);
+    try { readVerifiedJson(candidate, 'kv/manifest.json', { validate: validManifest }); }
+    catch {
+        const backup = readVerifiedJson(candidate, 'kv/manifest.json.bak', { validate: validManifest });
+        atomicWriteJson(candidate, 'kv/manifest.json', backup);
+        report.warnings.push('V1 이미지 연결표는 kv/manifest.json.bak에서 복구했습니다.');
+    }
+    const hints = [];
+    // Empty or stale catalogs must not hide files. Keep their exact bytes outside the copy.
+    for (const file of CATALOGS) for (const suffix of ['', '.bak', '.sha256', '.bak.sha256']) {
+        const relative = file + suffix, from = path.join(candidate, relative);
+        if (!fs.existsSync(from)) continue;
+        if (suffix === '' || suffix === '.bak') {
+            try {
+                const hint = readVerifiedJson(candidate, relative);
+                if (hint?.schemaVersion === 1 && Array.isArray(hint.characters) && object(hint.collections)
+                    && hint.characters.every(c => typeof c?.id === 'string' && Array.isArray(c.chats)
+                        && c.chats.every(chat => typeof chat?.id === 'string'))) hints.push(hint);
+            } catch { /* Invalid hints are archived, not applied. */ }
+        }
+        const archived = path.join(output, 'original-indexes', relative);
+        fs.mkdirSync(path.dirname(archived), { recursive: true });
+        fs.renameSync(from, archived);
+    }
+    const { createUserDataRepository } = require('../server/node/user-data-repository.cjs');
+    const legacy = createUserDataRepository({ dataRoot: candidate, readOnly: true });
+    const index = legacy.rebuildSidebarIndex();
+    ordered(index.characters, hints.map(hint => hint.characters.map(c => c.id)));
+    for (const character of index.characters) ordered(character.chats,
+        hints.map(hint => hint.characters.find(c => c.id === character.id)?.chats.map(c => c.id)));
+    for (const field of Object.keys(index.collections)) index.collections[field] = ordered(
+        index.collections[field].map(id => ({ id })), hints.map(hint => hint.collections[field])).map(item => item.id);
+    atomicWriteJson(candidate, 'index/sidebar.json', index);
+    atomicWriteJson(candidate, 'settings/entity-order.json', index);
+    atomicWriteJson(output, 'rebuilt-v1-index.json', index);
+    const canonical = legacy.exportLegacyDatabase();
+    for (const character of canonical.characters) for (const chat of character.chats) {
+        if (!chat.message.every(object)) throw new Error(`대화 JSONL에 잘못된 메시지가 있습니다: ${character.chaId}/${chat.id}`);
+    }
+    // Some shared import modules initialize logging; confine those writes to the copy too.
+    const previousRoot = process.env.RISUBARD_DATA_ROOT;
+    process.env.RISUBARD_DATA_ROOT = candidate;
+    try {
+        const store = require('../server/node/file-kv.cjs').createFileKv({ dataRoot: candidate });
+        const { encodeRisuSaveLegacy } = require('../server/node/utils.cjs');
+        const { decodeImportDatabase } = require('../server/node/canonical-import.cjs');
+        const database = await decodeImportDatabase(encodeRisuSaveLegacy(canonical), key => store.kvGet(key));
+        const repository = createUserDataRepository({ dataRoot: candidate, formatVersion: 2 });
+        const converted = repository.importLegacyDatabase(database, {
+            mode: 'replace', strictAssets: true, readAsset: key => {
+                const sourcePath = store.kvGetSourcePath(key);
+                return sourcePath ? { sourcePath } : null;
+            },
+            allAssetKeys: store.kvList('assets/'), assetSourceRoot: candidate,
+            checkSpace: true, rollbackOnFailure: true,
+        });
+        if (!isDeepStrictEqual(repository.exportLegacyDatabase(), converted.database)) {
+            throw new Error('V1 복구본의 변환 전후 내용이 일치하지 않습니다.');
+        }
+        report.warnings.push('V1 파일에서 목록을 복구하고 복사본을 V2로 변환했습니다. 기존 데이터 캐시는 사용하지 않았습니다.');
+    } finally {
+        if (previousRoot === undefined) delete process.env.RISUBARD_DATA_ROOT;
+        else process.env.RISUBARD_DATA_ROOT = previousRoot;
+    }
+}
 
 async function recoverSaveIndex(sourceArg, outputArg) {
     const source = fs.realpathSync(sourceArg);
@@ -28,8 +107,9 @@ async function recoverSaveIndex(sourceArg, outputArg) {
     let before;
     const issue = (file, message) => report.errors.push({ file, message });
     try {
-        before = inventory(source, true); // Reject links and record every byte before copying.
-        if (before.some(([file]) => /^\.journal[/\\][^/\\]+\.json$/.test(file))) {
+        before = inventory(source, true, { includeMigrationControl: true }); // Include Docker's original backups too.
+        if (before.some(([file]) => /^\.journal[/\\][^/\\]+\.json$/.test(file)
+            || /^\.risubard-v2-migration[/\\](swap\.json|migration\.lock)$/.test(file))) {
             throw new Error('미완료 저장 journal이 있습니다. 인덱스만 교체하지 말고 저장 작업 복구를 먼저 검토하세요.');
         }
         fs.mkdirSync(candidate);
@@ -47,6 +127,13 @@ async function recoverSaveIndex(sourceArg, outputArg) {
                 if (checksumFile(to) !== hash) throw new Error('복사본 검증 실패: 원본이 변경되었거나 디스크 오류가 있습니다.');
             }
         }
+        const files = new Set(before.filter(([, size]) => size !== 'directory').map(([file]) => file.replaceAll('\\', '/')));
+        const hasV1 = [...files].some(file => /^(presets|modules|personas|lorebooks)\/[^/]+\.json$/.test(file)
+            || /^characters\/[^/]+\/metadata\.json$/.test(file) && !files.has(file.replace(/metadata\.json$/, 'character.json')));
+        const hasV2 = [...files].some(file => /^(characters|modules|personas|prompts|lorebooks)\/[^/]+\/(character|module|persona|settings|lorebook)\.json$/.test(file));
+        report.sourceFormat = hasV1 ? 1 : 2;
+        if (hasV1 && (hasV2 || files.has('settings/layout.json'))) throw new Error('V1·V2 형식이 섞여 있습니다. 파일을 임의로 합치지 말고 원본 폴더 구성을 확인하세요.');
+        if (hasV1) await convertV1Copy(candidate, output, report);
         const index = { schemaVersion: 2, updatedAt: Date.now(), characters: [], collections: {}, paths: {}, names: {} };
         const hints = [];
         for (const file of ['settings/entity-order.json', 'index/sidebar.json', 'settings/entity-order.json.bak', 'index/sidebar.json.bak']) {
@@ -58,11 +145,6 @@ async function recoverSaveIndex(sourceArg, outputArg) {
             } catch { /* Hints never decide whether an actual entity is included. */ }
         }
         report.warnings.push('원래 순서가 기록에 없으면 폴더명 순서로 배치합니다. 복구 후 프롬프트·페르소나·대화 선택을 확인하세요.');
-        function ordered(items, lists) {
-            const ranks = new Map();
-            for (const list of lists) if (Array.isArray(list)) for (const id of list) if (typeof id === 'string' && !ranks.has(id)) ranks.set(id, ranks.size);
-            return items.sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
-        }
         function directories(relative) {
             const target = path.join(candidate, relative);
             if (!fs.existsSync(target)) return [];
@@ -147,7 +229,7 @@ async function recoverSaveIndex(sourceArg, outputArg) {
         ordered(index.characters, hints.map(hint => hint.characters.map(item => item?.id)));
         Object.assign(report.counts, { characters: index.characters.length, chats, messages });
         if (!index.characters.length && !Object.values(index.collections).some(ids => ids.length)) {
-            issue('characters/', '복구 가능한 V2 항목이 없습니다. 구형 파일 저장소는 이 도구의 대상이 아닙니다.');
+            issue('characters/', '복구 가능한 항목이 없습니다. V1 또는 V2의 실제 항목 파일이 필요합니다.');
         }
         for (const file of ['settings/app.json', 'secrets/credentials.json']) {
             try {
@@ -175,10 +257,11 @@ async function recoverSaveIndex(sourceArg, outputArg) {
             }
             // Exercise the real native catalog validator without reassembling a giant database.bin.
             require('../server/node/native-document-store.cjs').createNativeDocumentStore({ dataRoot: candidate }).catalog();
+            atomicWriteJson(candidate, 'settings/native-runtime.json', { schemaVersion: 1, mode: 'native-documents' });
         }
     } catch (error) { issue('', error.message); }
     try {
-        report.sourceUnchanged = !!before && isDeepStrictEqual(inventory(source, true), before);
+        report.sourceUnchanged = !!before && isDeepStrictEqual(inventory(source, true, { includeMigrationControl: true }), before);
         if (!report.sourceUnchanged) issue('', '원본이 실행 중 변경되었거나 원본 검증을 완료하지 못했습니다.');
     } catch { issue('', '원본 최종 검증 실패'); }
     if (!report.errors.length) {
@@ -196,7 +279,7 @@ async function recoverSaveIndex(sourceArg, outputArg) {
 if (require.main === module) {
     const args = process.argv.slice(2);
     if (args.length !== 2 || args.some(arg => arg.startsWith('--'))) {
-        console.error('사용법: node scripts/recover-save-index.cjs SOURCE NEW_OUTPUT_DIRECTORY\n서버 종료 후 실행하세요. 원본 전체 크기만큼 별도 여유 공간이 필요합니다.');
+        console.error('사용법: node scripts/recover-save-index.cjs SOURCE NEW_OUTPUT_DIRECTORY\n서버 종료 후 실행하세요. 원본 전체 복사와 V1 변환용 추가 여유 공간이 필요합니다.');
         process.exitCode = 1;
     } else recoverSaveIndex(...args).then(report => {
         console.log(JSON.stringify({ status: report.status, counts: report.counts, errors: report.errors, recoveredPath: report.recoveredPath }, null, 2));

@@ -66,7 +66,7 @@ try {
         $node = (Get-Command node.exe -ErrorAction Stop).Source
     }
     if (-not $NoDialogs) {
-        $notice = "먼저 리스바드 서버 창을 모두 닫아 주세요.`r`n`r`n1. 남은 세이브 폴더를 선택합니다.`r`n2. 복구 결과를 보관할 폴더를 선택합니다.`r`n`r`n원본은 그대로 보존하며 별도 복사본을 만듭니다. 원본 전체 크기만큼 여유 공간이 필요합니다."
+        $notice = "먼저 리스바드 서버 창을 모두 닫아 주세요.`r`n`r`n1. 남은 세이브 폴더를 선택합니다.`r`n2. 복구 결과를 보관할 폴더를 선택합니다.`r`n`r`n원본은 그대로 보존하며 별도 복사본을 만듭니다. 원본 전체 복사와 구형 세이브 변환에 필요한 여유 공간이 있어야 합니다."
         if ([System.Windows.Forms.MessageBox]::Show($notice, 'RisuBard 세이브 복구', 'OKCancel', 'Information') -ne 'OK') { exit 0 }
         $Source = Select-Directory '남은 원본 세이브 폴더를 선택하세요. characters, personas, settings 폴더가 들어 있는 위치입니다.' $false
         if (-not $Source) { exit 0 }
@@ -85,7 +85,20 @@ try {
         }
         if ($hasEntity) { break }
     }
-    if (-not $hasEntity) { throw '이 위치에서 V2 세이브 파일을 찾지 못했습니다. characters, personas, settings 폴더가 바로 들어 있는 세이브 폴더를 선택하세요. 구형 저장소는 이 도구로 복구할 수 없습니다.' }
+    if (-not $hasEntity) {
+        $characters = Join-Path $chosenSource 'characters'
+        if (Test-Path -LiteralPath $characters -PathType Container) {
+            foreach ($folder in Get-ChildItem -LiteralPath $characters -Directory) {
+                if (Test-Path -LiteralPath (Join-Path $folder.FullName 'metadata.json') -PathType Leaf) { $hasEntity = $true; break }
+            }
+        }
+        foreach ($group in @('personas', 'modules', 'presets', 'lorebooks')) {
+            $directory = Join-Path $chosenSource $group
+            if ((Test-Path -LiteralPath $directory -PathType Container) -and
+                (Get-ChildItem -LiteralPath $directory -File -Filter '*.json' | Select-Object -First 1)) { $hasEntity = $true; break }
+        }
+    }
+    if (-not $hasEntity) { throw '이 위치에서 V1·V2 세이브 파일을 찾지 못했습니다. characters, personas, settings 폴더가 바로 들어 있는 세이브 폴더를 선택하세요. hex 파일이나 SQLite만 남은 저장소는 지원하지 않습니다.' }
     $sourcePrefix = $chosenSource.TrimEnd([char[]]'\/') + [IO.Path]::DirectorySeparatorChar
     if ($destination -eq $chosenSource -or $destination.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw '결과 보관 폴더는 원본 세이브 바깥에서 선택하세요.'

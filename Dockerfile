@@ -50,6 +50,8 @@ COPY --from=builder /app/src/ts/risubard ./src/ts/risubard
 COPY --from=builder /app/dist ./dist
 
 ENV NODE_ENV=production
+ENV RISUBARD_MIGRATION_HOST=0.0.0.0
+ENV RISUBARD_MIGRATION_IN_PLACE=1
 EXPOSE 7777
 
 CMD ["pnpm", "runserver"]

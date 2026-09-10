@@ -119,7 +119,7 @@ async function planMigration(root, workspace) {
         // Do not copy an old checksum over regenerated metadata.
         for (const name of [...operations.keys()]) if (name.endsWith('.sha256') && operations.has(name.slice(0, -7))) operations.delete(name);
         const result = [...operations.values()];
-        const stats = fs.statfsSync(workspace);
+        const stats = fs.statfsSync(root);
         const blockSize = Math.max(4096, Number(stats.bsize));
         let outputBytes = 0, allocatedBytes = 0;
         for (const op of result) {

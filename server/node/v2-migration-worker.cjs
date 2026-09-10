@@ -6,9 +6,11 @@ const { isDeepStrictEqual } = require('util');
 const { inventory, needsMigration } = require('./v2-migration-gate.cjs');
 const { planMigration } = require('./v2-migration-plan.cjs');
 const { atomicWriteJson, fsyncDirectory, commitTransaction } = require('./file-store.cjs');
+const volume = require('./v2-migration-volume.cjs');
 
-async function inspectMigration(root) {
-    const workspace = fs.mkdtempSync(`${root}.v2-stage-`);
+async function inspectMigration(root, backup) {
+    const inPlace = backup && volume.isVolumeBackup(root, backup);
+    const workspace = fs.mkdtempSync(inPlace ? path.join(volume.prepareVolume(root), `${path.basename(root)}.v2-stage-`) : `${root}.v2-stage-`);
     try {
         const plan = await planMigration(root, workspace);
         return { sourceBytes: plan.before.reduce((sum, entry) => sum + (typeof entry[1] === 'number' ? entry[1] : 0), 0),
@@ -18,6 +20,15 @@ async function inspectMigration(root) {
 
 async function migrate(root, backup, options = {}) {
     root = fs.realpathSync(root);
+    const inPlace = volume.isVolumeBackup(root, backup);
+    if (inPlace) {
+        const lock = volume.acquireVolumeLock(root);
+        try {
+            volume.recoverVolume(root, lock.token);
+            if (!needsMigration(root)) return { alreadyMigrated: true };
+            return await migrateLocked(root, backup, { ...options, volumeLockToken: lock.token });
+        } finally { lock.release(); }
+    }
     const lock = `${root}.v2-lock`;
     if (fs.existsSync(lock)) {
         const pid = Number(fs.readFileSync(lock, 'utf8'));
@@ -29,6 +40,7 @@ async function migrate(root, backup, options = {}) {
     const fd = fs.openSync(lock, 'wx', 0o600);
     try {
         fs.writeFileSync(fd, String(process.pid)); fs.fsyncSync(fd);
+        volume.recoverVolume(root);
         if (!needsMigration(root)) return { alreadyMigrated: true };
         return await migrateLocked(root, backup, options);
     } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
@@ -36,9 +48,10 @@ async function migrate(root, backup, options = {}) {
 
 async function migrateLocked(root, backup, options) {
     if (root === path.dirname(root)) throw new Error('A filesystem root cannot be migrated');
+    const inPlace = volume.isVolumeBackup(root, backup);
     const parent = path.dirname(root), prefix = path.join(parent, 'backups', `${path.basename(root)}.v1-`);
-    if (!backup.startsWith(prefix) || !/^[a-f0-9-]{36}$/.test(backup.slice(prefix.length)) || fs.existsSync(backup)) throw new Error('Invalid migration backup destination');
-    const workspace = fs.mkdtempSync(`${root}.v2-stage-`), stage = `${workspace}-output`;
+    if ((!inPlace && (!backup.startsWith(prefix) || !/^[a-f0-9-]{36}$/.test(backup.slice(prefix.length)))) || fs.existsSync(backup)) throw new Error('Invalid migration backup destination');
+    const workspace = fs.mkdtempSync(inPlace ? path.join(volume.prepareVolume(root), `${path.basename(root)}.v2-stage-`) : `${root}.v2-stage-`), stage = `${workspace}-output`;
     const journal = `${root}.v2-swap.json`;
     let prepared = false;
     const phase = name => options.onPhase?.(name);
@@ -46,7 +59,7 @@ async function migrateLocked(root, backup, options) {
         phase('checking');
         const plan = await planMigration(root, workspace);
         const checkSpace = required => {
-            const stats = (options.statfs || fs.statfsSync)(parent);
+            const stats = (options.statfs || fs.statfsSync)(inPlace ? root : parent);
             if (Number(stats.bavail) * Number(stats.bsize) < required) throw new Error('V2 파일 생성에 필요한 디스크 여유 공간이 부족합니다. 원본은 변경하지 않았습니다.');
         };
         checkSpace(plan.remainingBytes);
@@ -84,6 +97,12 @@ async function migrateLocked(root, backup, options) {
         options.beforePublish?.();
         if (!isDeepStrictEqual(plan.before, inventory(root, true))) throw new Error('기존 저장소가 이관 중 변경되었습니다. 다른 서버와 편집기를 종료한 뒤 다시 시도하세요.');
         phase('publish');
+        if (inPlace) {
+            prepared = true;
+            try { volume.publishVolume(root, stage, backup); }
+            catch (error) { volume.recoverVolume(root, options.volumeLockToken); throw error; }
+            return { backup, outputBytes: plan.outputBytes };
+        }
         fs.mkdirSync(path.dirname(backup), { recursive: true });
         if (fs.realpathSync(path.dirname(backup)) !== path.dirname(backup)) throw new Error('Backup directory must not be a link');
         const state = { root, backup, stage, id: backup.slice(prefix.length) };
@@ -108,7 +127,7 @@ if (require.main === module) {
     let finished = false;
     process.on('disconnect', () => { if (!finished) process.exit(1); });
     const task = process.argv[4] === '--inspect'
-        ? inspectMigration(process.argv[2]).then(inspection => process.send?.({ inspection }))
+        ? inspectMigration(process.argv[2], process.argv[3]).then(inspection => process.send?.({ inspection }))
         : migrate(process.argv[2], process.argv[3], { onPhase: phase => process.send?.({ phase }) });
     task.then(() => { finished = true; process.disconnect?.(); }).catch(error => {
         finished = true; process.send?.({ error: error.message }); console.error(error.message);

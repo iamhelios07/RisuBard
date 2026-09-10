@@ -46,6 +46,17 @@ test('creates independent verified folder backups with restoration info and uniq
     fs.writeFileSync(path.join(first.path, 'risuai.db'), 'edited copy')
     expect(fs.readFileSync(path.join(root, 'risuai.db'), 'utf8')).toBe('original bytes')
 })
+
+test('a whole-folder backup includes original archives in the Docker migration control directory', () => {
+    const { root, parent } = fixture()
+    const control = require('./v2-migration-volume.cjs').prepareVolume(root)
+    fs.mkdirSync(path.join(control, 'backups'))
+    fs.writeFileSync(path.join(control, 'backups/original.bin'), 'preserved pre-migration data')
+    const result = createLocalBackup(root, parent)
+    expect(fs.readFileSync(path.join(result.path, '.risubard-v2-migration/backups/original.bin'), 'utf8')).toBe('preserved pre-migration data')
+    expect(inventory(result.path, true, { includeMigrationControl: true }).map(([name, size, , hash]) => [name, size, hash]))
+        .toEqual(inventory(root, true, { includeMigrationControl: true }).map(([name, size, , hash]) => [name, size, hash]))
+})
 test('rejects nested and relative destinations, insufficient space and concurrent changes', () => {
     const { root, parent } = fixture(), before = inventory(root, true)
     expect(() => createLocalBackup(root, root)).toThrow()

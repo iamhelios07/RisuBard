@@ -104,7 +104,7 @@ test('interrupted swap restores the original instead of booting an empty store',
     expect(fs.existsSync(path.join(parent, 'save.v2-swap.json'))).toBe(false)
 })
 
-test('actual server entry waits for consent, starts after migration, and exports a complete local backup', async () => {
+test.each(['portable', 'docker'])('actual %s server entry waits for consent, starts after migration, and exports a complete local backup', async deployment => {
     const { root, parent } = fixture(); seed(root)
     fs.writeFileSync(path.join(root, '__password'), 'migration-test')
     const before = inventory(root, true)
@@ -115,7 +115,9 @@ test('actual server entry waits for consent, starts after migration, and exports
     const port = (probe.address() as import('node:net').AddressInfo).port
     await new Promise<void>(resolve => probe.close(() => resolve()))
     const child = spawn(process.execPath, [path.resolve('server/node/server.cjs')], {
-        cwd: parent, env: { ...process.env, RISUBARD_DATA_ROOT: root, PORT: String(port), OPEN_BROWSER: '0', RISU_UPDATE_CHECK: 'false' },
+        cwd: parent, env: { ...process.env, RISUBARD_DATA_ROOT: root, PORT: String(port), OPEN_BROWSER: '0', RISU_UPDATE_CHECK: 'false',
+            RISUBARD_MIGRATION_HOST: deployment === 'docker' ? '0.0.0.0' : '127.0.0.1',
+            RISUBARD_MIGRATION_IN_PLACE: deployment === 'docker' ? '1' : '0' },
         windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     })
     let output = ''
@@ -147,8 +149,9 @@ test('actual server entry waits for consent, starts after migration, and exports
         expect(JSON.stringify(exported.normalized)).toContain('Keep me')
         expect((await client.importBackup(bytes)).ok).toBe(true)
         expect(normalizeBackup(await client.exportBackup()).normalized).toEqual(exported.normalized)
-        const backups = fs.readdirSync(path.join(parent, 'backups'))
-        expect(inventory(path.join(parent, 'backups', backups[0]), true)).toEqual(before)
+        const backupRoot = deployment === 'docker' ? path.join(root, '.risubard-v2-migration/backups') : path.join(parent, 'backups')
+        const backups = fs.readdirSync(backupRoot)
+        expect(inventory(path.join(backupRoot, backups[0]), true)).toEqual(before)
     } finally {
         speculative?.destroy()
         if (child.exitCode === null) {

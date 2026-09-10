@@ -21,7 +21,7 @@ function backupDestination(root, requested) {
 
 function createLocalBackup(root, requested, options = {}) {
     const { source, parent } = backupDestination(root, requested);
-    const before = inventory(source, true);
+    const before = inventory(source, true, { includeMigrationControl: true });
     const bytes = before.reduce((sum, e) => sum + (typeof e[1] === 'number' ? e[1] : 0), 0);
     let remaining = bytes + before.length * 8192 + 16 * 1024 * 1024;
     const checkSpace = () => {
@@ -49,12 +49,12 @@ function createLocalBackup(root, requested, options = {}) {
             options.onProgress?.({ copiedBytes: copied, totalBytes: bytes });
         }
         options.beforeVerify?.();
-        if (!isDeepStrictEqual(before, inventory(source, true))) throw new Error('백업 중 원본이 변경되었습니다. 다른 서버와 편집기를 종료하고 다시 시도하세요.');
+        if (!isDeepStrictEqual(before, inventory(source, true, { includeMigrationControl: true }))) throw new Error('백업 중 원본이 변경되었습니다. 다른 서버와 편집기를 종료하고 다시 시도하세요.');
         const info = { schemaVersion: 1, format: 'original-data-folder', sourcePath: source, createdAt: new Date().toISOString(), bytes,
             instructions: '이 백업은 .bin 파일이 아닌 원본 저장 폴더 사본입니다. 서버를 종료하고 data 폴더를 별도 위치에 복사한 뒤 해당 경로를 RISUBARD_DATA_ROOT로 지정해 실행하세요. 기존 저장소 위에 덮어쓰지 마세요.' };
         const fd = fs.openSync(path.join(stage, 'backup-info.json'), 'wx');
         try { fs.writeFileSync(fd, JSON.stringify(info, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-        for (const e of inventory(stage).reverse()) if (e[1] === 'directory') fsyncDirectory(path.join(stage, e[0]));
+        for (const e of inventory(stage, false, { includeMigrationControl: true }).reverse()) if (e[1] === 'directory') fsyncDirectory(path.join(stage, e[0]));
         fs.renameSync(stage, final); published = true; fsyncDirectory(parent);
         return { path: path.join(final, 'data'), infoPath: path.join(final, 'backup-info.json'), bytes, completedAt: info.createdAt };
     } finally {

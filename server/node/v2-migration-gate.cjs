@@ -5,8 +5,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
+const https = require('https');
 const { fork } = require('child_process');
 const { resolveDataRoot } = require('./data-root.cjs');
+const volume = require('./v2-migration-volume.cjs');
 
 function needsMigration(root) {
     if (!fs.existsSync(root)) return false;
@@ -19,9 +21,10 @@ function needsMigration(root) {
         || fs.readdirSync(root).some(name => /^[a-fA-F0-9]+$/.test(name) && name.length % 2 === 0);
 }
 
-function inventory(root, hashes = false) {
+function inventory(root, hashes = false, options = {}) {
     const entries = [];
     function visit(relative) {
+        if (!options.includeMigrationControl && relative === volume.CONTROL_DIRECTORY && volume.hasVolumeControl(root)) return;
         const file = path.join(root, relative), stat = fs.lstatSync(file);
         if (stat.isSymbolicLink()) throw new Error('이관 경로에 링크가 있습니다. 실제 저장 폴더를 사용하세요.');
         if (stat.isDirectory()) {
@@ -55,7 +58,7 @@ async function inspect(root, backupPath, statfs = fs.statfsSync) {
         child.once('error', reject);
         child.once('exit', code => code === 0 && result ? resolve(result) : reject(new Error(failure || 'Migration planning failed')));
     });
-    const stats = statfs(path.dirname(root));
+    const stats = statfs(volume.isVolumeBackup(root, backupPath) ? root : path.dirname(root));
     const availableBytes = Number(stats.bavail) * Number(stats.bsize);
     return { sourcePath: root, backupPath, ...plan, availableBytes, enoughSpace: availableBytes >= plan.requiredBytes };
 }
@@ -65,6 +68,7 @@ function swapPaths(root) {
 }
 
 function recoverSwap(root) {
+    volume.recoverVolume(root);
     const { parent, journal } = swapPaths(root);
     if (!fs.existsSync(journal)) return;
     const state = JSON.parse(fs.readFileSync(journal, 'utf8'));
@@ -98,30 +102,53 @@ function launchWorker(root, backup, update) {
 
 async function beforeStartup(options = {}) {
     const root = path.resolve(options.root || resolveDataRoot());
-    recoverSwap(root);
-    if (!needsMigration(root)) return true;
-    const id = crypto.randomUUID(), backup = path.join(path.dirname(root), 'backups', `${path.basename(root)}.v1-${id}`);
+    let startupError;
+    try { recoverSwap(root); if (!needsMigration(root)) return true; }
+    catch (error) { startupError = error; }
+    const id = crypto.randomUUID();
+    const backup = process.env.RISUBARD_MIGRATION_IN_PLACE === '1'
+        ? volume.volumeBackup(root, id)
+        : path.join(path.dirname(root), 'backups', `${path.basename(root)}.v1-${id}`);
     const token = crypto.randomBytes(32).toString('hex');
-    let state = { phase: 'ready', ...await (options.inspect || inspect)(root, backup) };
-    state.localBackupDirectory = path.dirname(root);
+    const host = options.host || process.env.RISUBARD_MIGRATION_HOST || '127.0.0.1';
+    const networkGate = !['127.0.0.1', '::1', 'localhost'].includes(host);
+    const state = { phase: 'checking', sourcePath: root, backupPath: backup, enoughSpace: false };
+    state.localBackupDirectory = volume.isVolumeBackup(root, backup) ? '' : path.dirname(root);
     const sslRoot = path.join(process.cwd(), 'server/node/ssl/certificate');
     state.protocol = fs.existsSync(path.join(sslRoot, 'server.key')) && fs.existsSync(path.join(sslRoot, 'server.crt')) ? 'https:' : 'http:';
     return new Promise((resolve, reject) => {
-        const server = http.createServer(async (req, res) => {
+        const handleRequest = async (req, res) => {
             res.setHeader('Cache-Control', 'no-store');
             res.setHeader('X-Content-Type-Options', 'nosniff');
-            // The bootstrap page is local-only and cannot be controlled by remote
-            // websites (including DNS rebinding) or another connected user.
-            if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)
-                || !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '')) {
-                res.writeHead(403); res.end('Open the migration page on the server PC using localhost.'); return;
+            res.setHeader('Referrer-Policy', 'no-referrer');
+            let requestUrl;
+            try { requestUrl = new URL(req.url, 'http://localhost'); }
+            catch { res.writeHead(400); res.end(); return; }
+            const localRequest = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)
+                && /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '');
+            const authorized = req.headers['x-migration-token'] === token;
+            const openWithToken = req.method === 'GET' && requestUrl.pathname === '/'
+                && requestUrl.searchParams.get('migration-token') === token;
+            // Network access is opt-in (Docker enables it). The console secret
+            // is required to open the page remotely; status and writes always
+            // require its header. A hostile Host cannot bypass the local gate.
+            if (!localRequest && !(networkGate && (authorized || openWithToken))) {
+                res.writeHead(403); res.end('Open the migration URL printed in the server console. For Docker, replace localhost with the Docker host address.'); return;
             }
-            if (req.method === 'GET' && req.url === '/') {
+            if (req.method === 'GET' && requestUrl.pathname === '/api/update-check') {
+                // v0.9.25 polls this endpoint after swapping app files. It must
+                // be able to finish and reload into consent, even during a slow
+                // inspection. This response grants no access to the save.
+                res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                res.end(JSON.stringify({ currentVersion: require('../../package.json').version,
+                    hasUpdate: false, severity: 'none', canSelfUpdate: false, migrationRequired: true })); return;
+            }
+            if (req.method === 'GET' && requestUrl.pathname === '/') {
                 res.setHeader('Content-Type', 'text/html; charset=utf-8');
                 res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'nonce-" + token + "'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'");
                 res.end(fs.readFileSync(path.join(__dirname, 'v2-migration.html'), 'utf8').replaceAll('__TOKEN__', token)); return;
             }
-            if (req.headers['x-migration-token'] !== token) { res.writeHead(403); res.end(); return; }
+            if (!authorized) { res.writeHead(403); res.end(); return; }
             res.setHeader('Content-Type', 'application/json; charset=utf-8');
             if (req.method === 'GET' && req.url === '/status') { res.end(JSON.stringify(state)); return; }
             if (req.method === 'POST' && req.url === '/backup' && ['ready', 'failed'].includes(state.phase)) {
@@ -154,7 +181,7 @@ async function beforeStartup(options = {}) {
                         if (!error && result) state.localBackup = result;
                         else state.localBackupError = error || failure || '백업 생성에 실패했습니다.';
                         try {
-                            const stats = fs.statfsSync(path.dirname(root));
+                            const stats = fs.statfsSync(volume.isVolumeBackup(root, backup) ? root : path.dirname(root));
                             state.availableBytes = Number(stats.bavail) * Number(stats.bsize);
                             state.enoughSpace = state.availableBytes >= state.requiredBytes;
                         } catch { state.enoughSpace = false; }
@@ -179,7 +206,7 @@ async function beforeStartup(options = {}) {
             if (req.method === 'POST' && req.url === '/start' && state.phase === 'ready') {
                 state.phase = 'checking';
                 try { Object.assign(state, await (options.inspect || inspect)(root, backup)); }
-                catch (error) { state.phase = 'ready'; res.writeHead(400); res.end(JSON.stringify({ error: error.message })); return; }
+                catch (error) { state.phase = 'failed'; state.error = error.message; res.writeHead(400); res.end(JSON.stringify({ error: error.message })); return; }
                 if (!state.enoughSpace) { state.phase = 'ready'; res.writeHead(507); res.end(JSON.stringify(state)); return; }
                 state.phase = 'copy'; res.end('{}');
                 (options.worker || launchWorker)(root, backup, phase => { state.phase = phase; }).then(() => {
@@ -196,14 +223,28 @@ async function beforeStartup(options = {}) {
                 return;
             }
             res.writeHead(409); res.end('{}');
-        });
+        };
+        const server = state.protocol === 'https:'
+            ? https.createServer({ key: fs.readFileSync(path.join(sslRoot, 'server.key')), cert: fs.readFileSync(path.join(sslRoot, 'server.crt')) }, handleRequest)
+            : http.createServer(handleRequest);
         server.on('error', reject);
-        server.listen(options.port ?? Number(process.env.PORT || 7777), '127.0.0.1', () => {
-            const url = `http://localhost:${server.address().port}/`;
-            console.log(`[Server] V2 migration consent required: ${url}`);
+        server.listen(options.port ?? Number(process.env.PORT || 7777), host, () => {
+            const url = `${state.protocol}//localhost:${server.address().port}/${networkGate ? '?migration-token=' + token : ''}`;
+            console.log(`[Server] Preparing V2 migration: ${url}`);
             console.log(`[Server] Original save will be preserved at: ${backup}`);
-            options.onListening?.(server.address().port, token);
             if (process.env.OPEN_BROWSER === '1') require('./open-server-browser.cjs').openServerBrowser(url);
+            Promise.resolve().then(() => {
+                if (startupError) throw startupError;
+                return (options.inspect || inspect)(root, backup);
+            }).then(info => {
+                Object.assign(state, info, { phase: 'ready' });
+            }).catch(error => {
+                state.phase = 'failed'; state.error = error.message;
+                console.error('[V2 migration] Inspection failed:', error.message);
+            }).finally(() => {
+                console.log(`[Server] V2 migration consent required: ${url}`);
+                options.onListening?.(server.address().port, token);
+            });
         });
     });
 }

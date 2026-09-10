@@ -28,7 +28,7 @@ function copyTree(source: string, target: string) {
     }
 }
 
-function fixture() {
+function fixture(formatVersion = 2) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-index-recovery-'))
     roots.push(root)
     const source = path.join(root, 'source'), output = path.join(root, 'output')
@@ -40,9 +40,83 @@ function fixture() {
         botPresets: [{ id: 'prompt-a', name: '프롬프트', mainPrompt: '프롬프트 본문' }],
         loreBook: [{ id: 'lore-a', name: '로어북', data: '로어북 본문' }],
     }
-    createUserDataRepository({ dataRoot: source, formatVersion: 2 }).importLegacyDatabase(database, { mode: 'replace' })
+    createUserDataRepository({ dataRoot: source, formatVersion }).importLegacyDatabase(database, { mode: 'replace' })
     return { source, output, database }
 }
+
+function v1Fixture() {
+    const result = fixture(1)
+    const { source } = result
+    const store = require('./file-kv.cjs').createFileKv({ dataRoot: source })
+    store.kvSet('assets/portrait.png', Buffer.from('original-image'))
+    store.kvSet('database/database.bin', Buffer.from('stale cache must never be used'))
+    const metadata = JSON.parse(fs.readFileSync(path.join(source, 'characters/char-a/metadata.json'), 'utf8'))
+    atomicWriteJson(source, 'characters/char-a/metadata.json', { ...metadata, image: 'assets/portrait.png' })
+    atomicWriteJson(source, 'characters/char-a/chats/z/draft.json', { data: '미완성 초안' })
+    fs.mkdirSync(path.join(source, 'characters/char-a/wiki'), { recursive: true })
+    fs.writeFileSync(path.join(source, 'characters/char-a/wiki/keep.md'), '위키 원본')
+    return { ...result, store }
+}
+
+test.each(['missing', 'empty', 'malformed'])('recovers V1 canonical files with %s catalogs and ignores the stale database cache', state => {
+    const { source, output, database } = v1Fixture()
+    for (const relative of ['index/sidebar.json', 'settings/entity-order.json']) {
+        if (state === 'missing') fs.unlinkSync(path.join(source, relative))
+        else atomicWriteJson(source, relative, state === 'empty'
+            ? { schemaVersion: 1, characters: [], collections: {} } : { broken: true })
+    }
+    const before = inventory(source, true)
+    const { success, report } = run(source, output)
+    expect(report?.errors).toEqual([])
+    expect(success).toBe(true)
+    expect(report).toMatchObject({ sourceFormat: 1, status: 'recovered', sourceUnchanged: true, counts: { characters: 1, chats: 2, messages: 2 } })
+    expect(inventory(source, true)).toEqual(before)
+    const recoveredRoot = path.join(output, 'recovered')
+    const repository = createUserDataRepository({ dataRoot: recoveredRoot })
+    const recovered = repository.exportLegacyDatabase()
+    expect(recovered.characters[0].desc).toBe(database.characters[0].desc)
+    expect(recovered.characters[0].chats.map((chat: any) => chat.message[0].data).sort()).toEqual(['대화 a', '대화 z'])
+    for (const field of ['personas', 'modules', 'botPresets', 'loreBook']) expect(recovered[field]).toEqual((database as any)[field])
+    expect(require('./file-kv.cjs').createFileKv({ dataRoot: recoveredRoot }).kvGet(recovered.characters[0].image)).toEqual(Buffer.from('original-image'))
+    expect(repository.loadAssistantDraft('char-a', 'z')).toMatchObject({ data: '미완성 초안' })
+    expect(fs.readFileSync(path.join(recoveredRoot, 'characters/캐릭터/wiki/keep.md'), 'utf8')).toBe('위키 원본')
+    // Exercise the server compatibility entry point in a fresh process.
+    const actual = execFileSync(process.execPath, ['-e',
+        'const db=require("./server/node/db.cjs"); require("./server/node/utils.cjs").decodeRisuSave(db.kvGet("database/database.bin")).then(x=>console.log("RECOVERED_ID="+x.characters[0].chaId))'],
+    { encoding: 'utf8', env: { ...process.env, RISUBARD_DATA_ROOT: recoveredRoot } })
+    expect(actual).toContain('RECOVERED_ID=char-a')
+})
+
+test('uses a surviving V1 KV manifest backup and restores cold chat content', () => {
+    const { source, output, store } = v1Fixture()
+    store.kvSet('coldstorage/chat-body', Buffer.from(JSON.stringify([{ role: 'user', data: '보관된 대화' }])))
+    fs.copyFileSync(path.join(source, 'kv/manifest.json'), path.join(source, 'kv/manifest.json.bak'))
+    fs.unlinkSync(path.join(source, 'kv/manifest.json'))
+    fs.writeFileSync(path.join(source, 'characters/char-a/chats/z/messages.jsonl'), JSON.stringify({ role: 'user', data: '\uEF01COLDSTORAGE\uEF01chat-body' }) + '\n')
+    fs.unlinkSync(path.join(source, 'index/sidebar.json'))
+    const { success, report } = run(source, output)
+    expect(report?.errors).toEqual([])
+    expect(success).toBe(true)
+    expect(createUserDataRepository({ dataRoot: path.join(output, 'recovered') }).loadChat('char-a', 'z').message[0].data).toBe('보관된 대화')
+})
+
+test.each(['message', 'asset', 'manifest', 'settings', 'mixed'])('blocks incomplete or mixed V1 recovery: %s', failure => {
+    const { source, output, store } = v1Fixture()
+    if (failure === 'message') fs.unlinkSync(path.join(source, 'characters/char-a/chats/z/messages.jsonl'))
+    if (failure === 'asset') fs.unlinkSync(store.kvGetSourcePath('assets/portrait.png'))
+    if (failure === 'manifest') for (const suffix of ['', '.bak']) fs.rmSync(path.join(source, 'kv/manifest.json' + suffix), { force: true })
+    if (failure === 'settings') fs.unlinkSync(path.join(source, 'settings/app.json'))
+    if (failure === 'mixed') {
+        fs.mkdirSync(path.join(source, 'personas/V2'), { recursive: true })
+        fs.writeFileSync(path.join(source, 'personas/V2/persona.json'), '{}')
+    }
+    const before = inventory(source, true)
+    const { success, report } = run(source, output)
+    expect(success).toBe(false)
+    expect(report).toMatchObject({ status: 'blocked', sourceUnchanged: true })
+    expect(fs.existsSync(path.join(output, 'recovered'))).toBe(false)
+    expect(inventory(source, true)).toEqual(before)
+})
 function run(source: string, output: string) {
     let success = true
     try { execFileSync(process.execPath, [script, source, output], { stdio: 'pipe' }) }
@@ -124,6 +198,23 @@ test('recovers missing layout marker from validated V2 entity manifests', () => 
     expect(createUserDataRepository({ dataRoot: path.join(output, 'recovered') }).loadSidebarIndex().schemaVersion).toBe(2)
 })
 
+test('copies Docker migration backup files and refuses a pending volume swap or migration lock', () => {
+    const { source, output } = fixture()
+    const control = path.join(source, '.risubard-v2-migration')
+    fs.mkdirSync(path.join(control, 'backups/original'), { recursive: true })
+    fs.writeFileSync(path.join(control, 'format.json'), JSON.stringify({ schemaVersion: 1 }))
+    fs.writeFileSync(path.join(control, 'backups/original/keep.txt'), 'previous original save')
+    expect(run(source, output).success).toBe(true)
+    expect(fs.readFileSync(path.join(output, 'recovered/.risubard-v2-migration/backups/original/keep.txt'), 'utf8')).toBe('previous original save')
+    for (const marker of ['swap.json', 'migration.lock']) {
+        fs.writeFileSync(path.join(control, marker), '{}')
+        const blocked = run(source, path.join(path.dirname(source), marker + '-output'))
+        expect(blocked.success).toBe(false)
+        expect(blocked.report).toMatchObject({ status: 'blocked', sourceUnchanged: true })
+        fs.unlinkSync(path.join(control, marker))
+    }
+})
+
 test('refuses directory links without reading or modifying their target', () => {
     const { source, output } = fixture()
     const target = path.join(path.dirname(source), 'linked-data')
@@ -147,8 +238,8 @@ test('rejects existing output and output inside source', () => {
     expect(fs.existsSync(path.join(source, 'nested'))).toBe(false)
 })
 
-test.runIf(process.platform === 'win32')('Windows helper creates a recovery and a launcher that uses only the recovered data root', () => {
-    const { source, output } = fixture()
+test.runIf(process.platform === 'win32').each([1, 2])('Windows helper creates a V%s recovery and a launcher that uses only the recovered data root', version => {
+    const { source, output } = version === 1 ? v1Fixture() : fixture()
     fs.unlinkSync(path.join(source, 'index/sidebar.json'))
     fs.unlinkSync(path.join(source, 'settings/entity-order.json'))
     const destination = path.join(path.dirname(source), '결과 & test !')

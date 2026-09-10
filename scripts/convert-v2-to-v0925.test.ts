@@ -188,8 +188,25 @@ describe('standalone V2 to v0.9.25 V1 converter', () => {
 
         expect(result.status, result.stderr).toBe(0)
         expect(JSON.parse(result.stdout)).toMatchObject({ destination: path.resolve(destination), characters: 1 })
+        expect(result.stderr).toMatch(/\[100%\].*완료/)
         expect(fs.existsSync(path.join(destination, 'conversion/v2-to-v0925.json'))).toBe(true)
         expect(inventory(source)).toEqual(before)
+    })
+
+    test('reports monotonic progress with the current task and finishes at 100 percent', () => {
+        const { source, destination } = makeFixture()
+        const progress: Array<{ percent: number, message: string }> = []
+
+        convertV2ToV0925(source, destination, {
+            onProgress: (event: { percent: number, message: string }) => progress.push(event),
+        })
+
+        expect(progress.length).toBeGreaterThan(5)
+        expect(progress[0]).toMatchObject({ percent: 0 })
+        expect(progress.at(-1)).toMatchObject({ percent: 100 })
+        expect(progress.at(-1)?.message).toMatch(/완료/)
+        expect(progress.every((event, index) => index === 0 || event.percent >= progress[index - 1].percent)).toBe(true)
+        expect(progress.every(event => Number.isInteger(event.percent) && event.message.length > 0)).toBe(true)
     })
 
     test('decodes V2 data into a verified V1 root without changing the source', () => {
@@ -272,6 +289,71 @@ describe('standalone V2 to v0.9.25 V1 converter', () => {
         expect(fs.existsSync(destination)).toBe(false)
     })
 
+    test('recovery mode skips a missing chat message file and records a warning', () => {
+        const { source, destination } = makeFixture()
+        const missing = path.join(source, 'characters/주인공/chats/첫 대화/messages.jsonl')
+        fs.unlinkSync(missing)
+
+        expect(() => convertV2ToV0925(source, destination)).toThrow(/missing/i)
+
+        const warnings: string[] = []
+        const result = convertV2ToV0925(source, destination, {
+            skipMissing: true,
+            onWarning: (warning: string) => warnings.push(warning),
+        })
+
+        expect(result.warnings).toEqual(warnings)
+        expect(warnings).toEqual([expect.stringMatching(/messages\.jsonl/)])
+        const reopened = createUserDataRepository({ dataRoot: destination })
+        expect(reopened.exportLegacyDatabase().characters[0].chats[0].message).toEqual([])
+        const record = JSON.parse(fs.readFileSync(path.join(destination, 'conversion/v2-to-v0925.json'), 'utf8'))
+        expect(record.warnings).toEqual(warnings)
+    })
+
+    test('recovery mode keeps an asset when one indexed copy is missing', () => {
+        const { source, destination, avatar } = makeFixture()
+        fs.unlinkSync(path.join(source, 'shared/assets/avatar.png'))
+
+        const result = convertV2ToV0925(source, destination, { skipMissing: true })
+
+        expect(result.warnings).toEqual([expect.stringMatching(/shared\/assets\/avatar\.png/)])
+        const manifest = JSON.parse(fs.readFileSync(path.join(destination, 'kv/manifest.json'), 'utf8'))
+        expect(fs.readFileSync(path.join(destination, 'kv/objects', manifest.entries['assets/avatar.png'].object))).toEqual(avatar)
+    })
+
+    test('recovery mode omits an entity whose required manifest is missing', () => {
+        const { source, destination } = makeFixture()
+        fs.unlinkSync(path.join(source, 'characters/주인공/manifest.json'))
+
+        const result = convertV2ToV0925(source, destination, { skipMissing: true })
+
+        expect(result.characters).toBe(0)
+        expect(result.warnings).toEqual([expect.stringMatching(/characters\/주인공/)])
+        const reopened = createUserDataRepository({ dataRoot: destination })
+        expect(reopened.exportLegacyDatabase().characters).toEqual([])
+    })
+
+    test('the CLI returns a distinct status when missing files can be retried in recovery mode', () => {
+        const { source } = makeFixture()
+        fs.unlinkSync(path.join(source, 'characters/주인공/chats/첫 대화/messages.jsonl'))
+
+        const result = spawnSync(process.execPath, [path.resolve('scripts/convert-v2-to-v0925.cjs'), source], {
+            encoding: 'utf8',
+        })
+
+        expect(result.status).toBe(2)
+        expect(result.stderr).toMatch(/Missing V2 source file/)
+        expect(fs.existsSync(`${source}-v1`)).toBe(false)
+    })
+
+    test('recovery mode never ignores a missing core V2 layout file', () => {
+        const { source, destination } = makeFixture()
+        fs.unlinkSync(path.join(source, 'settings/layout.json'))
+
+        expect(() => convertV2ToV0925(source, destination, { skipMissing: true })).toThrow(/missing/i)
+        expect(fs.existsSync(destination)).toBe(false)
+    })
+
     test('fails closed on a stale V2 checksum sidecar', () => {
         const { source, destination } = makeFixture()
         writeFile(source, 'characters/주인공/character.json.sha256', `${'0'.repeat(64)}\n`)
@@ -348,5 +430,13 @@ describe('standalone V2 to v0.9.25 V1 converter', () => {
         })).toThrow(/must not exist/i)
         expect(fs.existsSync(destination)).toBe(true)
         expect(fs.readdirSync(path.dirname(destination)).some(name => name.includes('.incomplete-'))).toBe(false)
+    })
+
+    test('the Windows launcher accepts typed paths and offers explicit missing-file recovery', () => {
+        const batch = fs.readFileSync(path.resolve('scripts/portable/V2-to-V1.bat'), 'utf8')
+
+        expect(batch).toContain('set /p "SOURCE=V2 save folder path: "')
+        expect(batch).toContain('choice /C YN')
+        expect(batch).toContain('--skip-missing')
     })
 })

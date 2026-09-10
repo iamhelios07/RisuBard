@@ -53,6 +53,40 @@ function digestFile(filePath) {
     return hash.digest('hex');
 }
 
+function isMissingError(error) {
+    for (let current = error; current; current = current.cause) {
+        if (current.code === 'ENOENT' || /Missing V2 source file|ENOENT/.test(String(current.message || current))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function countTreeFiles(root) {
+    let count = 0;
+    function visit(directory) {
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+            const target = path.join(directory, entry.name);
+            const stat = assertNoLink(target, 'V2 source');
+            if (stat.isDirectory()) visit(target);
+            else if (stat.isFile()) count += 1;
+            else throw new Error(`V2 source contains an unsupported reparse point or file type: ${target}`);
+        }
+    }
+    visit(root);
+    return count;
+}
+
+function createProgressReporter(callback) {
+    let lastPercent = -1;
+    return (percent, message) => {
+        const normalized = Math.max(0, Math.min(100, Math.floor(percent)));
+        if (normalized <= lastPercent) return;
+        lastPercent = normalized;
+        callback?.({ percent: normalized, message });
+    };
+}
+
 function normalizedAbsolute(value) {
     const resolved = path.resolve(value);
     return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
@@ -143,6 +177,7 @@ function treeDigest(root, options = {}) {
                     throw new Error(`V2 source changed while being read: ${normalized}`);
                 }
                 hash.update('\n');
+                options.onFile?.(normalized);
             } else {
                 throw new Error(`V2 source contains an unsupported reparse point or file type: ${normalized}`);
             }
@@ -180,7 +215,7 @@ function fieldParent(entity, fieldPath) {
     return parent;
 }
 
-function decodeEntity(root, kind, folder) {
+function decodeEntity(root, kind, folder, options = {}) {
     const prefix = assertSafeRelative(folder, 'V2 entity folder');
     const filename = MAIN_FILES[kind];
     if (!filename) throw new Error(`Unknown V2 entity kind: ${kind}`);
@@ -204,9 +239,17 @@ function decodeEntity(root, kind, folder) {
     }
     const entity = readJson(root, `${prefix}/${filename}`, isObject);
     for (const [name, fieldPath] of Object.entries(manifest.fieldFiles)) {
-        const value = name.endsWith('.json')
-            ? readJson(root, `${prefix}/${assertSafeRelative(name)}`)
-            : readBytes(root, `${prefix}/${assertSafeRelative(name)}`).toString('utf8');
+        const relative = `${prefix}/${assertSafeRelative(name)}`;
+        let value;
+        try {
+            value = name.endsWith('.json')
+                ? readJson(root, relative)
+                : readBytes(root, relative).toString('utf8');
+        } catch (error) {
+            if (!options.skipMissing || !isMissingError(error)) throw error;
+            options.warn?.(`누락된 ${kind} 분리 파일을 건너뜁니다: ${relative}`);
+            continue;
+        }
         const parent = fieldParent(entity, fieldPath);
         parent[fieldPath[fieldPath.length - 1]] = value;
     }
@@ -295,7 +338,7 @@ function validateIndex(root, index) {
     return index;
 }
 
-function loadV2Database(root) {
+function loadV2Database(root, options = {}) {
     const layout = readJson(root, 'settings/layout.json', value => (
         value?.schemaVersion === 2 && value.format === 'risubard-named-folders'
     ));
@@ -306,20 +349,48 @@ function loadV2Database(root) {
     const database = deepMerge(withoutSchema(settings), withoutSchema(secrets));
 
     for (const [field, , kind] of GROUPS) {
-        database[field] = index.collections[field].map(id => {
-            const entity = decodeEntity(root, kind, index.paths[field][id]);
-            if (entity.id !== id) throw new Error(`Canonical ${kind} ID does not match the V2 index`);
-            return entity;
-        });
+        database[field] = [];
+        for (const id of index.collections[field]) {
+            try {
+                const entity = decodeEntity(root, kind, index.paths[field][id], options);
+                if (entity.id !== id) throw new Error(`Canonical ${kind} ID does not match the V2 index`);
+                database[field].push(entity);
+            } catch (error) {
+                if (!options.skipMissing || !isMissingError(error)) throw error;
+                options.warn?.(`누락된 ${kind} 항목을 건너뜁니다: ${index.paths[field][id]}`);
+            }
+        }
     }
-    database.characters = index.characters.map(characterSummary => {
-        const character = decodeEntity(root, 'character', characterSummary.path);
+    database.characters = [];
+    for (const characterSummary of index.characters) {
+        let character;
+        try {
+            character = decodeEntity(root, 'character', characterSummary.path, options);
+        } catch (error) {
+            if (!options.skipMissing || !isMissingError(error)) throw error;
+            options.warn?.(`누락된 character 항목을 건너뜁니다: ${characterSummary.path}`);
+            continue;
+        }
         if (character.chaId !== characterSummary.id) throw new Error('Canonical character ID does not match the V2 index');
-        const chats = characterSummary.chats.map(chatSummary => {
-            const chat = decodeEntity(root, 'chat', chatSummary.path);
+        const chats = [];
+        for (const chatSummary of characterSummary.chats) {
+            let chat;
+            try {
+                chat = decodeEntity(root, 'chat', chatSummary.path, options);
+            } catch (error) {
+                if (!options.skipMissing || !isMissingError(error)) throw error;
+                options.warn?.(`누락된 chat 항목을 건너뜁니다: ${chatSummary.path}`);
+                continue;
+            }
             if (chat.id !== chatSummary.id) throw new Error('Canonical chat ID does not match the V2 index');
             const relative = `${assertSafeRelative(chatSummary.path)}/messages.jsonl`;
-            const text = readBytes(root, relative).toString('utf8');
+            let text = '';
+            try {
+                text = readBytes(root, relative).toString('utf8');
+            } catch (error) {
+                if (!options.skipMissing || !isMissingError(error)) throw error;
+                options.warn?.(`누락된 채팅 메시지 파일을 빈 대화로 복원합니다: ${relative}`);
+            }
             const messages = text.split(/\r?\n/).filter(Boolean).map((line, lineIndex) => {
                 let message;
                 try { message = JSON.parse(line); }
@@ -327,10 +398,10 @@ function loadV2Database(root) {
                 if (!isObject(message)) throw new Error(`Invalid V2 chat message at ${relative}:${lineIndex + 1}`);
                 return message;
             });
-            return { ...chat, message: messages };
-        });
-        return { ...character, chats };
-    });
+            chats.push({ ...chat, message: messages });
+        }
+        database.characters.push({ ...character, chats });
+    }
     return { database, index, settings, secrets };
 }
 
@@ -394,7 +465,7 @@ function validateKvObject(root, key, entry) {
     return sourcePath;
 }
 
-function loadAssets(root, database, kvManifest) {
+function loadAssets(root, database, kvManifest, options = {}) {
     const assetIndex = readJson(root, 'settings/asset-files.json', value => (
         value?.schemaVersion === 2 && isObject(value.entries)
     ));
@@ -415,11 +486,18 @@ function loadAssets(root, database, kvManifest) {
             addFolded(paths, relative, 'owned asset path');
             let sourcePath;
             try { sourcePath = resolveSource(root, relative); }
-            catch (error) { throw new Error(`Missing or unreadable owned asset ${key}: ${relative}`, { cause: error }); }
+            catch (error) {
+                if (!options.skipMissing || !isMissingError(error)) {
+                    throw new Error(`Missing or unreadable owned asset ${key}: ${relative}`, { cause: error });
+                }
+                options.warn?.(`누락된 에셋 사본을 건너뜁니다: ${relative}`);
+                continue;
+            }
             if (!fs.statSync(sourcePath).isFile()) throw new Error(`Missing or unreadable owned asset ${key}: ${relative}`);
             const current = digestFile(sourcePath);
             if (!versions.has(current)) versions.set(current, sourcePath);
         }
+        if (versions.size === 0) continue;
         let selected;
         if (versions.size === 1) {
             selected = versions.values().next().value;
@@ -435,7 +513,10 @@ function loadAssets(root, database, kvManifest) {
         ...Object.keys(kvManifest.entries).filter(key => key.startsWith('assets/')),
     ]);
     for (const reference of collectAssetReferences(database, knownKeys)) {
-        if (!assets.has(reference)) throw new Error(`Database-referenced asset is missing from the owned index: ${reference}`);
+        if (!assets.has(reference)) {
+            if (!options.skipMissing) throw new Error(`Database-referenced asset is missing from the owned index: ${reference}`);
+            options.warn?.(`참조된 에셋을 복원하지 못했습니다: ${reference}`);
+        }
     }
     return assets;
 }
@@ -470,13 +551,20 @@ function copyObject(stage, sourcePath, expectedHash) {
     if (digestFile(target) !== expectedHash) throw new Error(`Copied object checksum mismatch: ${expectedHash}`);
 }
 
-function writeKv(stage, sourceRoot, kvManifest, assets) {
+function writeKv(stage, sourceRoot, kvManifest, assets, options = {}) {
     const entries = Object.create(null);
     for (const [key, entry] of Object.entries(kvManifest.entries)) {
         // The V1 runtime rebuilds this derived cache from the converted files.
         if (key.startsWith('assets/') || key === 'database/database.bin') continue;
         if (typeof key !== 'string' || key.includes('\0')) throw new Error('Invalid V2 KV key');
-        const sourcePath = validateKvObject(sourceRoot, key, entry);
+        let sourcePath;
+        try {
+            sourcePath = validateKvObject(sourceRoot, key, entry);
+        } catch (error) {
+            if (!options.skipMissing || !isMissingError(error)) throw error;
+            options.warn?.(`누락된 KV 데이터를 건너뜁니다: ${key}`);
+            continue;
+        }
         copyObject(stage, sourcePath, entry.object);
         entries[key] = { ...entry };
     }
@@ -547,9 +635,13 @@ function copyPassThroughEntries(sourceRoot, destinationRoot, entries) {
     }
 }
 
-function loadDrafts(sourceRoot, index) {
+function loadDrafts(sourceRoot, index, database) {
     const drafts = [];
+    const convertedChats = new Set(database.characters.flatMap(character => (
+        character.chats.map(chat => `${character.chaId}\0${chat.id}`)
+    )));
     for (const character of index.characters) for (const chat of character.chats) {
+        if (!convertedChats.has(`${character.id}\0${chat.id}`)) continue;
         const relative = `${assertSafeRelative(chat.path)}/draft.json`;
         if (resolveSource(sourceRoot, relative, { optional: true })) {
             const value = readJson(sourceRoot, relative, isObject);
@@ -559,7 +651,7 @@ function loadDrafts(sourceRoot, index) {
     return drafts;
 }
 
-function verifyStage(stage, expected) {
+function verifyStage(stage, expected, options = {}) {
     const repository = createUserDataRepository({ dataRoot: stage });
     assert.deepStrictEqual(repository.exportLegacyDatabase(), expected.database);
     assert.deepStrictEqual(readJson(stage, 'settings/app.json'), expected.settings);
@@ -593,7 +685,7 @@ function verifyStage(stage, expected) {
             }
         }
     }
-    treeDigest(stage);
+    treeDigest(stage, { onFile: options.onFile });
 }
 
 function safeCleanupStage(stage, destination) {
@@ -626,17 +718,39 @@ function validateRoots(sourceValue, destinationValue) {
 }
 
 function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
+    const report = createProgressReporter(options.onProgress);
+    const warnings = [];
+    const warn = warning => {
+        if (warnings.includes(warning)) return;
+        warnings.push(warning);
+        options.onWarning?.(warning);
+    };
+    const recovery = { skipMissing: options.skipMissing === true, warn };
+
+    report(0, '변환 경로를 확인하는 중...');
     const { source, destination } = validateRoots(sourceValue, destinationValue);
-    const sourceDigest = treeDigest(source);
+    report(1, 'V2 파일 목록을 확인하는 중...');
+    const sourceFileCount = Math.max(1, countTreeFiles(source));
+    let sourceFilesRead = 0;
+    const sourceDigest = treeDigest(source, {
+        onFile: relative => {
+            sourceFilesRead += 1;
+            report(2 + (sourceFilesRead / sourceFileCount) * 18, `V2 원본 검사 중: ${relative}`);
+        },
+    });
     const stage = `${destination}.incomplete-${crypto.randomUUID()}`;
     let published = false;
     try {
-        const loaded = loadV2Database(source);
+        report(21, '설정과 사이드바 인덱스를 읽는 중...');
+        const loaded = loadV2Database(source, recovery);
+        report(42, '캐릭터·채팅·프롬프트를 V1 형식으로 복원하는 중...');
         const kvManifest = loadKvManifest(source);
-        const assets = loadAssets(source, loaded.database, kvManifest);
-        const drafts = loadDrafts(source, loaded.index);
+        const assets = loadAssets(source, loaded.database, kvManifest, recovery);
+        report(52, '이미지와 첨부 파일을 확인하는 중...');
+        const drafts = loadDrafts(source, loaded.index, loaded.database);
         const passThroughEntries = listPassThroughEntries(source);
 
+        report(58, 'V1 저장 폴더를 만드는 중...');
         fs.mkdirSync(stage, { recursive: false });
         const repository = createUserDataRepository({ dataRoot: stage });
         repository.importLegacyDatabase(loaded.database, { mode: 'replace' });
@@ -647,7 +761,9 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
             if (fs.existsSync(backup)) fs.unlinkSync(backup);
         }
         for (const draft of drafts) repository.saveAssistantDraft(draft.characterId, draft.chatId, draft.value);
-        const kvEntries = writeKv(stage, source, kvManifest, assets);
+        report(68, '에셋과 플러그인 데이터를 복사하는 중...');
+        const kvEntries = writeKv(stage, source, kvManifest, assets, recovery);
+        report(74, '위키·로그·보조 폴더를 복사하는 중...');
         copyPassThroughEntries(source, stage, passThroughEntries);
         atomicWriteJson(stage, 'conversion/v2-to-v0925.json', {
             schemaVersion: 1,
@@ -656,8 +772,12 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
             characters: loaded.database.characters.length,
             assets: assets.size,
             kvEntries: Object.keys(kvEntries).length,
+            warnings,
         });
 
+        report(79, '변환된 V1 데이터를 다시 읽어 검증하는 중...');
+        const stageFileCount = Math.max(1, countTreeFiles(stage));
+        let stageFilesRead = 0;
         verifyStage(stage, {
             sourceRoot: source,
             database: loaded.database,
@@ -666,10 +786,24 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
             drafts,
             assetKeys: [...assets.keys()],
             passThroughEntries,
+        }, {
+            onFile: relative => {
+                stageFilesRead += 1;
+                report(80 + (stageFilesRead / stageFileCount) * 9, `V1 결과 검사 중: ${relative}`);
+            },
         });
         options.beforePublish?.({ source, stage, destination });
-        if (treeDigest(source) !== sourceDigest) throw new Error('V2 source changed during conversion');
+        report(90, '변환 중 V2 원본이 바뀌지 않았는지 최종 확인하는 중...');
+        sourceFilesRead = 0;
+        const finalSourceDigest = treeDigest(source, {
+            onFile: relative => {
+                sourceFilesRead += 1;
+                report(90 + (sourceFilesRead / sourceFileCount) * 9, `V2 원본 최종 검사 중: ${relative}`);
+            },
+        });
+        if (finalSourceDigest !== sourceDigest) throw new Error('V2 source changed during conversion');
         if (fs.existsSync(destination)) throw new Error('Destination must not exist');
+        report(99, '검증된 V1 폴더를 게시하는 중...');
         fs.renameSync(stage, destination);
         try {
             (options.syncParentDirectory ?? fsyncDirectory)(path.dirname(destination));
@@ -679,12 +813,14 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
             throw error;
         }
         published = true;
+        report(100, 'V2에서 V1으로 변환 완료');
         return {
             sourceDigest,
             destination,
             characters: loaded.database.characters.length,
             assets: assets.size,
             kvEntries: Object.keys(kvEntries).length,
+            warnings,
         };
     } finally {
         if (!published) safeCleanupStage(stage, destination);
@@ -692,18 +828,25 @@ function convertV2ToV0925(sourceValue, destinationValue, options = {}) {
 }
 
 if (require.main === module) {
-    const [source, explicitDestination, ...extra] = process.argv.slice(2);
-    if (!source || extra.length) {
-        console.error('Usage: node scripts/convert-v2-to-v0925.cjs <v2-source-root> [new-v1-destination]');
+    const args = process.argv.slice(2);
+    const skipMissing = args.includes('--skip-missing');
+    const unknownOptions = args.filter(value => value.startsWith('--') && value !== '--skip-missing');
+    const [source, explicitDestination, ...extra] = args.filter(value => value !== '--skip-missing');
+    if (!source || extra.length || unknownOptions.length) {
+        console.error('Usage: node scripts/convert-v2-to-v0925.cjs [--skip-missing] <v2-source-root> [new-v1-destination]');
         process.exitCode = 1;
     } else {
         try {
             const destination = explicitDestination || `${path.resolve(source)}-v1`;
-            const result = convertV2ToV0925(source, destination);
+            const result = convertV2ToV0925(source, destination, {
+                skipMissing,
+                onProgress: ({ percent, message }) => console.error(`[${String(percent).padStart(3)}%] ${message}`),
+                onWarning: warning => console.error(`[경고] ${warning}`),
+            });
             console.log(JSON.stringify(result, null, 2));
         } catch (error) {
             console.error(error?.stack || String(error));
-            process.exitCode = 1;
+            process.exitCode = isMissingError(error) ? 2 : 1;
         }
     }
 }

@@ -86,7 +86,13 @@ async function planMigration(root, workspace) {
     const source = openSource(root, workspace);
     try {
         const legacy = createUserDataRepository({ dataRoot: root, readOnly: true });
-        const raw = source.read('database/database.bin');
+        // V1 documents are authoritative; the compatibility projection may lag
+        // behind recent message or settings writes. Decode canonical exports too
+        // so cold-storage references are hydrated before planning V2 output.
+        const canonical = fs.existsSync(path.join(root, 'settings/app.json'));
+        const raw = canonical
+            ? Buffer.from(require('./utils.cjs').encodeRisuSaveLegacy(legacy.exportLegacyDatabase()))
+            : source.read('database/database.bin');
         const database = raw ? await decodeImportDatabase(raw, key => source.read(key)) : legacy.exportLegacyDatabase();
         assignImportIds(database);
         const plan = createNamedUserDataRepository({ dataRoot: destination, readOnly: true, legacyFactory: () => legacy,

@@ -5,8 +5,8 @@
 // constructor sees a partially published tree.
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { atomicWriteJson, fsyncDirectory } = require('./file-store.cjs');
+const { acquireMigrationLock, isLockOwnerAlive } = require('./v2-migration-lock.cjs');
 const CONTROL_DIRECTORY = '.risubard-v2-migration';
 
 function hasVolumeControl(root) {
@@ -36,62 +36,9 @@ function isVolumeBackup(root, backup) {
     return /^[a-f0-9-]{36}$/.test(id) && backup === volumeBackup(root, id);
 }
 
-function processIdentity(pid) {
-    if (process.platform !== 'linux') return null;
-    try {
-        const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
-        const start = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19];
-        return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() + ':' + start;
-    } catch { return null; }
-}
-
-function pidAlive(pid) {
-    try { process.kill(pid, 0); return true; }
-    catch (error) { return error.code !== 'ESRCH'; }
-}
-
-function isLockOwnerAlive(owner, identity = processIdentity, alive = pidAlive) {
-    if (!Number.isSafeInteger(owner.pid) || owner.pid < 1) throw new Error('이관 잠금 기록을 확인해야 합니다.');
-    if (!alive(owner.pid)) return false;
-    const current = identity(owner.pid);
-    return !owner.identity || !current || owner.identity === current;
-}
-
 function acquireVolumeLock(root) {
-    const control = prepareVolume(root), lock = path.join(control, 'migration.lock');
-    const token = crypto.randomUUID(), temp = path.join(control, `.migration-lock-${token}.tmp`);
-    const claim = path.join(control, `.migration-owner-${token}.json`);
-    const fd = fs.openSync(temp, 'wx', 0o600);
-    try {
-        fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, identity: processIdentity(process.pid), token })); fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    try { fs.linkSync(temp, claim); } finally { fs.unlinkSync(temp); }
-    let acquired = false;
-    try {
-        // Every contender publishes its own immutable claim BEFORE scanning.
-        // With two overlapping claims at least one scan sees the other; it
-        // withdraws without touching the shared lock. Thus a paused stale-lock
-        // reclaimer cannot unlink a newer owner's record (the ABA problem).
-        for (const name of fs.readdirSync(control)) {
-            if (!/^\.migration-owner-[a-f0-9-]{36}\.json$/.test(name) || path.join(control, name) === claim) continue;
-            let owner;
-            try { owner = JSON.parse(fs.readFileSync(path.join(control, name), 'utf8')); }
-            catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-            if (isLockOwnerAlive(owner)) throw new Error('다른 이관 작업이 실행 중입니다.');
-        }
-        if (fs.existsSync(lock)) {
-            if (isLockOwnerAlive(JSON.parse(fs.readFileSync(lock, 'utf8')))) throw new Error('다른 이관 작업이 실행 중입니다.');
-            fs.unlinkSync(lock);
-        }
-        // The claim is already complete and synced. Exclusive link publication
-        // also protects against an older worker which has no claim protocol.
-        fs.linkSync(claim, lock); fsyncDirectory(control);
-        acquired = true;
-        return { token, release() {
-            if (JSON.parse(fs.readFileSync(lock, 'utf8')).token !== token) throw new Error('이관 잠금 소유자가 변경되었습니다.');
-            fs.unlinkSync(lock); fs.unlinkSync(claim); fsyncDirectory(control);
-        } };
-    } finally { if (!acquired) fs.unlinkSync(claim); }
+    const control = prepareVolume(root);
+    return acquireMigrationLock(path.join(control, 'migration.lock'), '.migration-owner-');
 }
 
 function validateSwap(root, state) {
@@ -123,16 +70,15 @@ function recoverVolume(root, lockToken) {
     if (!hasVolumeControl(root)) return;
     const control = path.join(root, CONTROL_DIRECTORY), journal = path.join(control, 'swap.json');
     const lockPath = path.join(control, 'migration.lock');
-    if (fs.existsSync(lockPath)) {
-        const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-        if (lockToken && owner.token !== lockToken) throw new Error('이관 잠금 소유자가 변경되었습니다.');
-        if (!lockToken && isLockOwnerAlive(owner)) throw new Error('다른 이관 작업이 실행 중입니다.');
-    } else if (lockToken) throw new Error('이관 잠금이 해제되었습니다.');
-    if (!fs.existsSync(journal)) return;
     if (!lockToken) {
         const lock = acquireVolumeLock(root);
         try { return recoverVolume(root, lock.token); } finally { lock.release(); }
     }
+    if (fs.existsSync(lockPath)) {
+        const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+        if (lockToken && owner.token !== lockToken) throw new Error('이관 잠금 소유자가 변경되었습니다.');
+    } else if (lockToken) throw new Error('이관 잠금이 해제되었습니다.');
+    if (!fs.existsSync(journal)) return;
     const state = JSON.parse(fs.readFileSync(journal, 'utf8'));
     validateSwap(root, state);
     if (!fs.existsSync(state.stage)) throw new Error('V2 volume recovery stage is missing');

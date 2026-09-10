@@ -195,7 +195,7 @@ test('plans only V2 output, preserves source during inspection, and fits below t
     expect(info.outputBytes).toBeLessThan(9 * 1024 * 1024)
     expect(info.requiredBytes).toBeLessThan(info.sourceBytes * 3 + 256 * 1024 * 1024)
     expect(inventory(root, true)).toEqual(before)
-    expect(fs.readdirSync(path.dirname(root))).toEqual(['save'])
+    expect(fs.readdirSync(path.dirname(root)).filter(name => name !== 'save.v2-lock.flock')).toEqual(['save'])
     const script = `require('./server/node/v2-migration-worker.cjs').migrate(process.argv[1], process.argv[2], {
         statfs: () => ({ bavail: 90 * 1024 * 1024, bsize: 1 }),
         onPhase(phase) { if (phase === 'verify') {
@@ -237,7 +237,7 @@ test.each(['before', 'during'])('disk exhaustion %s conversion leaves the origin
     expect(() => execFileSync(process.execPath, ['-e', script, root, backup], { stdio: 'pipe' })).toThrow()
     expect(inventory(root, true)).toEqual(before)
     expect(fs.existsSync(backup)).toBe(false)
-    expect(fs.readdirSync(path.dirname(root))).toEqual(['save'])
+    expect(fs.readdirSync(path.dirname(root)).filter(name => name !== 'save.v2-lock.flock')).toEqual(['save'])
 })
 
 test('carries drafts, wiki and inlays into the new tree', () => {
@@ -257,6 +257,23 @@ test('carries drafts, wiki and inlays into the new tree', () => {
     const r = createUserDataRepository({ dataRoot: root })
     expect(r.loadAssistantDraft('a', 'chat')).toEqual({ text: 'unfinished' })
     for (const name of ['risubard', 'inlays']) expect(fs.readFileSync(path.join(root, name, 'keep.txt'), 'utf8')).toBe(name)
+})
+
+test('canonical V1 messages and settings take precedence over an older compatibility cache', () => {
+    const { root, backup } = fixture(); seed(root)
+    const script = `const root = process.argv[1];
+        const store = require('./server/node/file-kv.cjs').createFileKv({dataRoot:root});
+        require('./server/node/utils.cjs').decodeRisuSave(store.kvGet('database/database.bin')).then(db => {
+            db.language = 'ko'; db.characters[0].chats[0].message.push({role:'user',data:'Newest canonical message'});
+            require('./server/node/user-data-repository.cjs').createUserDataRepository({dataRoot:root}).importLegacyDatabase(db,{mode:'sync'});
+        })`
+    execFileSync(process.execPath, ['-e', script, root], { stdio: 'pipe' })
+    const before = inventory(root, true)
+    execFileSync(process.execPath, [path.resolve('server/node/v2-migration-worker.cjs'), root, backup], { stdio: 'pipe' })
+    const data = require('./user-data-repository.cjs').createUserDataRepository({ dataRoot: root }).exportLegacyDatabase()
+    expect(data.characters[0].chats[0].message.at(-1).data).toBe('Newest canonical message')
+    expect(data.language).toBe('ko')
+    expect(inventory(backup, true)).toEqual(before)
 })
 
 test('detects source modification after planning and does not activate the result', () => {

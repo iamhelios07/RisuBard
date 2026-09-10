@@ -9,6 +9,7 @@ const https = require('https');
 const { fork } = require('child_process');
 const { resolveDataRoot } = require('./data-root.cjs');
 const volume = require('./v2-migration-volume.cjs');
+const { acquireSiblingLock } = require('./v2-migration-lock.cjs');
 
 function needsMigration(root) {
     if (!fs.existsSync(root)) return false;
@@ -67,8 +68,7 @@ function swapPaths(root) {
     return { parent: path.dirname(root), journal: `${root}.v2-swap.json` };
 }
 
-function recoverSwap(root) {
-    volume.recoverVolume(root);
+function recoverSiblingSwap(root) {
     const { parent, journal } = swapPaths(root);
     if (!fs.existsSync(journal)) return;
     const state = JSON.parse(fs.readFileSync(journal, 'utf8'));
@@ -83,6 +83,31 @@ function recoverSwap(root) {
     }
     fs.unlinkSync(journal);
 }
+
+function withRecoveredStore(root, action) {
+    // Hold the same lock as the worker through recovery AND layout detection.
+    // A missing root during a sibling swap must never look like a fresh save.
+    const mounted = volume.hasVolumeControl(root)
+        || (process.env.RISUBARD_MIGRATION_IN_PLACE === '1' && fs.existsSync(root));
+    if (!fs.existsSync(path.dirname(root))) return action();
+    const siblingPending = fs.existsSync(`${root}.v2-lock`) || fs.existsSync(`${root}.v2-swap.json`);
+    // Normal V2 startup must not require write access to the save's parent.
+    if (!mounted && !siblingPending && fs.existsSync(path.join(root, 'settings/layout.json')) && !needsMigration(root)) return action();
+    const sibling = !mounted || siblingPending ? acquireSiblingLock(root) : null;
+    try {
+        if (sibling) recoverSiblingSwap(root);
+        const volumeLock = volume.hasVolumeControl(root) || mounted ? volume.acquireVolumeLock(root) : null;
+        try {
+            if (volumeLock && !sibling && (fs.existsSync(`${root}.v2-lock`) || fs.existsSync(`${root}.v2-swap.json`))) {
+                throw new Error('다른 이관 작업이 실행 중입니다.');
+            }
+            if (volumeLock) volume.recoverVolume(root, volumeLock.token);
+            return action();
+        } finally { volumeLock?.release(); }
+    } finally { sibling?.release(); }
+}
+
+function recoverSwap(root) { return withRecoveredStore(root, () => {}); }
 
 function launchWorker(root, backup, update) {
     return new Promise((resolve, reject) => {
@@ -103,10 +128,13 @@ function launchWorker(root, backup, update) {
 async function beforeStartup(options = {}) {
     const root = path.resolve(options.root || resolveDataRoot());
     let startupError;
-    try { recoverSwap(root); if (!needsMigration(root)) return true; }
+    try { if (withRecoveredStore(root, () => !needsMigration(root))) return true; }
     catch (error) { startupError = error; }
     const id = crypto.randomUUID();
-    const backup = process.env.RISUBARD_MIGRATION_IN_PLACE === '1'
+    let inPlace = process.env.RISUBARD_MIGRATION_IN_PLACE === '1';
+    try { inPlace ||= volume.hasVolumeControl(root); }
+    catch (error) { startupError ||= error; }
+    const backup = inPlace
         ? volume.volumeBackup(root, id)
         : path.join(path.dirname(root), 'backups', `${path.basename(root)}.v1-${id}`);
     const token = crypto.randomBytes(32).toString('hex');
@@ -249,4 +277,4 @@ async function beforeStartup(options = {}) {
     });
 }
 
-module.exports = { beforeStartup, needsMigration, inventory, inspect, recoverSwap };
+module.exports = { beforeStartup, needsMigration, inventory, inspect, recoverSwap, recoverSiblingSwap };

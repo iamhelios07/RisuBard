@@ -56,6 +56,39 @@ test('old updater sees the installed version while migration awaits consent with
     } finally { await gate.close() }
 })
 
+test.each([false, true])('a second startup preserves a live sibling journal (old volume control: %s)', oldControl => {
+    const { root, parent } = fixture(), before = inventory(root, true)
+    const id = '11111111-1111-4111-8111-111111111111'
+    const backup = path.join(parent, 'backups', `save.v1-${id}`)
+    const stage = `${root}.v2-stage-interrupted-output`, journal = `${root}.v2-swap.json`
+    fs.mkdirSync(stage)
+    fs.writeFileSync(`${root}.v2-lock`, String(process.pid))
+    fs.writeFileSync(journal, JSON.stringify({ root, backup, stage, id }))
+    if (oldControl) require('./v2-migration-volume.cjs').prepareVolume(root)
+    const { recoverSwap } = require('./v2-migration-gate.cjs')
+    expect(() => recoverSwap(root)).toThrow('다른 이관 작업')
+    expect(fs.existsSync(journal)).toBe(true)
+    expect(inventory(root, true)).toEqual(before)
+    fs.mkdirSync(path.dirname(backup))
+    fs.renameSync(root, backup)
+    fs.unlinkSync(`${root}.v2-lock`)
+    recoverSwap(root)
+    expect(inventory(root, true)).toEqual(before)
+    expect(fs.existsSync(journal)).toBe(false)
+})
+
+test('an already migrated standalone save does not require writing its parent directory', async () => {
+    const { root } = fixture()
+    fs.mkdirSync(path.join(root, 'settings'))
+    fs.writeFileSync(path.join(root, 'settings/layout.json'), '{"schemaVersion":2}')
+    const open = fs.openSync
+    vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+        if (path.dirname(String(file)) === path.dirname(root) && flags !== 'r') throw Object.assign(Error('Parent is read only'), { code: 'EACCES' })
+        return open(file, flags, mode)
+    })
+    expect(await beforeStartup({ root })).toBe(true)
+})
+
 test('a missing image leaves an error page and local backup available instead of terminating startup', async () => {
     const { root, parent } = fixture(true), before = inventory(root, true)
     const gate = await startGate(root)

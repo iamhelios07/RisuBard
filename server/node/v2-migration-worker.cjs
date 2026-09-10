@@ -3,7 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { isDeepStrictEqual } = require('util');
-const { inventory, needsMigration } = require('./v2-migration-gate.cjs');
+const { inventory, needsMigration, recoverSiblingSwap } = require('./v2-migration-gate.cjs');
+const { acquireSiblingLock } = require('./v2-migration-lock.cjs');
 const { planMigration } = require('./v2-migration-plan.cjs');
 const { atomicWriteJson, fsyncDirectory, commitTransaction } = require('./file-store.cjs');
 const volume = require('./v2-migration-volume.cjs');
@@ -21,29 +22,24 @@ async function inspectMigration(root, backup) {
 async function migrate(root, backup, options = {}) {
     root = fs.realpathSync(root);
     const inPlace = volume.isVolumeBackup(root, backup);
+    if (!inPlace && volume.hasVolumeControl(root)) throw new Error('이 저장소는 볼륨 내부 이관이 필요합니다. 이관 안내 화면에서 다시 시작하세요.');
     if (inPlace) {
         const lock = volume.acquireVolumeLock(root);
         try {
+            if (fs.existsSync(`${root}.v2-lock`) || fs.existsSync(`${root}.v2-swap.json`)) throw new Error('다른 이관 작업이 실행 중입니다.');
             volume.recoverVolume(root, lock.token);
             if (!needsMigration(root)) return { alreadyMigrated: true };
             return await migrateLocked(root, backup, { ...options, volumeLockToken: lock.token });
         } finally { lock.release(); }
     }
-    const lock = `${root}.v2-lock`;
-    if (fs.existsSync(lock)) {
-        const pid = Number(fs.readFileSync(lock, 'utf8'));
-        if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('이관 잠금 기록을 확인해야 합니다: ' + lock);
-        try { process.kill(pid, 0); throw new Error('다른 이관 작업이 실행 중입니다.'); }
-        catch (error) { if (error.code !== 'ESRCH') throw error; }
-        fs.unlinkSync(lock);
-    }
-    const fd = fs.openSync(lock, 'wx', 0o600);
+    const lock = acquireSiblingLock(root);
     try {
-        fs.writeFileSync(fd, String(process.pid)); fs.fsyncSync(fd);
+        if (volume.hasVolumeControl(root)) throw new Error('이 저장소는 볼륨 내부 이관이 필요합니다. 이관 안내 화면에서 다시 시작하세요.');
+        recoverSiblingSwap(root);
         volume.recoverVolume(root);
         if (!needsMigration(root)) return { alreadyMigrated: true };
         return await migrateLocked(root, backup, options);
-    } finally { fs.closeSync(fd); fs.unlinkSync(lock); }
+    } finally { lock.release(); }
 }
 
 async function migrateLocked(root, backup, options) {

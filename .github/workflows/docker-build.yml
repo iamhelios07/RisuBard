@@ -2,9 +2,13 @@ name: Build and publish Docker image
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+    inputs:
+      publish:
+        description: Publish container images after validation
+        type: boolean
+        default: false
+  release:
+    types: [published]
 
 env:
   REGISTRY: ghcr.io
@@ -37,6 +41,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to the Container registry
+        if: github.event_name == 'release' || inputs.publish
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -53,71 +58,26 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true
+          tags: ${{ !(github.event_name == 'release' || inputs.publish) && format('risubard-validation:{0}', steps.slug.outputs.pair) || '' }}
+          outputs: ${{ (github.event_name == 'release' || inputs.publish) && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, steps.lower.outputs.image_name) || 'type=docker' }}
           cache-from: type=gha,scope=${{ steps.slug.outputs.pair }}
           cache-to: type=gha,scope=${{ steps.slug.outputs.pair }},mode=max
 
       - name: Smoke test migration on a mounted save
         shell: bash
         env:
-          SMOKE_IMAGE: ${{ env.REGISTRY }}/${{ steps.lower.outputs.image_name }}@${{ steps.build.outputs.digest }}
-        run: |
-          SMOKE_ROOT="$(mktemp -d)"
-          trap 'rm -rf -- "$SMOKE_ROOT"' EXIT
-          docker run --rm -i -v "$SMOKE_ROOT:/app/save" "$SMOKE_IMAGE" node <<'NODE'
-          const assert = require('node:assert/strict');
-          const fs = require('node:fs');
-          const crypto = require('node:crypto');
-          const { spawn } = require('node:child_process');
-          const { createFileKv } = require('./server/node/file-kv.cjs');
-          const { encodeRisuSaveLegacy } = require('./server/node/utils.cjs');
-          const { inventory } = require('./server/node/v2-migration-gate.cjs');
-          const { volumeBackup } = require('./server/node/v2-migration-volume.cjs');
-          const { migrate } = require('./server/node/v2-migration-worker.cjs');
-          (async () => {
-            assert.equal(process.env.RISUBARD_MIGRATION_HOST, '0.0.0.0');
-            assert.equal(process.env.RISUBARD_MIGRATION_IN_PLACE, '1');
-            const root = '/app/save', store = createFileKv({ dataRoot: root });
-            store.kvSet('assets/picture', Buffer.from('original image'));
-            store.kvSet('database/database.bin', Buffer.from(encodeRisuSaveLegacy({
-              characters: [{ chaId: 'smoke', name: 'Smoke', image: 'assets/picture', chats: [
-                { id: 'chat', name: 'Chat', message: [{ role: 'user', data: 'Keep this message' }] }
-              ] }], modules: [], personas: [], botPresets: [], loreBook: []
-            })));
-            const before = inventory(root, true), inode = fs.statSync(root).ino;
-            const backup = volumeBackup(root, crypto.randomUUID());
-            await migrate(root, backup);
-            assert.equal(fs.statSync(root).ino, inode);
-            assert.deepEqual(inventory(backup, true), before);
-            const repository = require('./server/node/user-data-repository.cjs').createUserDataRepository({ dataRoot: root });
-            const character = repository.exportLegacyDatabase().characters[0];
-            assert.equal(character.chats[0].message[0].data, 'Keep this message');
-            assert.deepEqual(createFileKv({ dataRoot: root }).kvGet(character.image), Buffer.from('original image'));
-            await new Promise((resolve, reject) => {
-              const child = spawn(process.execPath, ['server/node/server.cjs'], {
-                env: { ...process.env, PORT: '0', OPEN_BROWSER: '0', RISU_UPDATE_CHECK: 'false' }
-              });
-              let output = '', ready = false;
-              const timeout = setTimeout(() => { child.kill(); reject(new Error('Server start timed out: ' + output)); }, 30000);
-              const inspect = chunk => {
-                output += chunk;
-                if (!ready && /\[Server\] (HTTP|HTTPS) server is running\./.test(output)) { ready = true; child.kill(); }
-              };
-              child.stdout.on('data', inspect); child.stderr.on('data', inspect);
-              child.on('error', error => { clearTimeout(timeout); reject(error); });
-              child.on('exit', () => { clearTimeout(timeout); ready ? resolve() : reject(new Error(output)); });
-            });
-            console.log('Mounted-volume migration, original backup, assets, messages and server startup verified.');
-          })().catch(error => { console.error(error); process.exitCode = 1; });
-          NODE
+          SMOKE_IMAGE: ${{ (github.event_name == 'release' || inputs.publish) && format('{0}/{1}@{2}', env.REGISTRY, steps.lower.outputs.image_name, steps.build.outputs.digest) || format('risubard-validation:{0}', steps.slug.outputs.pair) }}
+        run: bash .github/scripts/verify-mounted-migration.sh
 
       - name: Export digest
+        if: github.event_name == 'release' || inputs.publish
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: github.event_name == 'release' || inputs.publish
         uses: actions/upload-artifact@v7
         with:
           name: digest-${{ steps.slug.outputs.pair }}
@@ -126,6 +86,7 @@ jobs:
           retention-days: 1
 
   merge:
+    if: github.event_name == 'release' || inputs.publish
     needs: build
     runs-on: ubuntu-latest
     permissions:

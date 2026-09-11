@@ -30,6 +30,7 @@ export interface BardLoreExclusion {
 export interface BardLoreSelectionInput {
     query: string
     priorityQuery?: string
+    routingEvidence?: string
     entries: BardLoreEntry[]
     tokenCounts: Record<string, number>
     settings: BardLoreSettings
@@ -132,7 +133,13 @@ export function selectBardLoreEntries(input: BardLoreSelectionInput): BardLoreSe
     const currentQuery = input.priorityQuery?.trim() || input.query
     const query = input.query.includes(currentQuery) ? input.query : `${input.query}\n${currentQuery}`
     // History supplies retrieval evidence, not instructions for the current turn.
-    const plan = planBardLoreQuery(currentQuery, compileBardLoreIndex(eligible), settings, input.scopeAliases)
+    const plan = planBardLoreQuery(
+        currentQuery,
+        compileBardLoreIndex(eligible),
+        settings,
+        input.scopeAliases,
+        input.routingEvidence,
+    )
     const latestDirectIds = new Set(plan.anchors.map((anchor) => anchor.entryId))
     const explicitSelection = plan.requestedCount !== undefined || plan.arbitrary || plan.intent === 'list'
 

@@ -16,6 +16,7 @@
         collectLoreBuilderSources,
         loadLoreBuilderSelections,
         matchLoreBuilderCharacterLorebook,
+        resolveLoreBuilderPromptPreset,
         saveLoreBuilderSelections,
         type LoreBuilderSelections,
         type LoreBuilderSourceSnapshot,
@@ -82,10 +83,15 @@
             characterLorebook: !!sources.characterLorebook,
             moduleLorebook: false,
         }
+        const selectedStylePreset = resolveLoreBuilderPromptPreset(
+            DBState.db.loreBuilderPromptPresets ?? [],
+            'style',
+            DBState.db.loreBuilderStylePromptPresetId ?? 'builtin:lore-style-ko',
+        )
         taskInstruction = DEFAULT_LORE_BUILDER_TASK_PROMPT
-        styleInstruction = defaultStyle
+        styleInstruction = selectedStylePreset?.content ?? defaultStyle
         taskPresetId = 'builtin:lore-task-default'
-        stylePresetId = 'builtin:lore-style-ko'
+        stylePresetId = selectedStylePreset?.id ?? 'builtin:lore-style-ko'
         userInstruction = ''
         originalDraft = currentContent
         draft = initialDraft

@@ -39,6 +39,7 @@ describe('persona builder UI connections', () => {
     })
 
     test('provides reusable preset selection and mutation controls', () => {
+        const builder = source('src/lib/Others/PersonaBuilder.svelte')
         const editor = source('src/lib/Others/PersonaPromptPresetEditor.svelte')
 
         expect(editor).toContain('<ShAccordion')
@@ -51,6 +52,9 @@ describe('persona builder UI connections', () => {
         expect(editor).toContain('data-persona-prompt-preset-save')
         expect(editor).toContain('data-persona-prompt-preset-overwrite')
         expect(editor).toContain('data-persona-prompt-preset-delete')
+        expect(builder).toContain('DBState.db.personaBuilderStylePromptPresetId')
+        expect(builder).toContain('resolvePersonaBuilderPromptPreset')
+        expect(editor).toContain('DBState.db.personaBuilderStylePromptPresetId = id || undefined')
     })
 
     test('keeps the result editable and exposes send, reset, and copy actions', () => {

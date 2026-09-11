@@ -59,13 +59,17 @@ import {
     type WikiPromptPreset,
 } from '../risubard/wikiPromptPreset';
 import {
+    normalizeBardLoreInstructionPresetState,
+    type BardLoreInstructionPreset,
+} from '../lorebook/bardLoreInstructionPreset';
+import {
     ARC_PLOTTER_DEFAULT_PRESET_ID,
     normalizeArcPlotterCustomPresets,
     normalizeArcPlotterPresetSelection,
     normalizeArcPlotterSettings,
     type ArcPlotterPreset,
 } from '../risubard/arcPlotterSettings';
-import { normalizeSelectedPersonaIndex } from '../personaScopes';
+import { getNewChatPersonaBinding, normalizeSelectedPersonaIndex } from '../personaScopes';
 import {
     normalizeArcaChatFontSizePx,
     normalizeArcaChatDialogSize,
@@ -843,6 +847,7 @@ export function setDatabase(data:Database){
     data.autoScrollToNewMessage ??= true
     data.alwaysScrollToNewMessage ??= false
     data.preserveChatScrollPosition ??= true
+    data.pinChatScrollNavigator ??= false
     data.newMessageButtonStyle ??= 'bottom-center'
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
@@ -919,6 +924,11 @@ export function setDatabase(data:Database){
         typeof data.risuBardResponseExcludeUserMessages === 'boolean'
             ? data.risuBardResponseExcludeUserMessages
             : data.risuBardResponseIncludeUserMessages === false
+    data.risuBardAnalysisExcludeUserMessages =
+        data.risuBardAnalysisExcludeUserMessages === true
+    data.risuBardBardChanEnabled = data.risuBardBardChanEnabled === true
+    data.risuBardBardChanModelMode =
+        data.risuBardBardChanModelMode === 'model' ? 'model' : 'memory'
     delete (data as { risuBardCanonicalMode?: unknown })
         .risuBardCanonicalMode
     data.risuBardAnalysisTokenLimit = normalizeRisuBardAnalysisTokenLimit(
@@ -988,6 +998,12 @@ export function setDatabase(data:Database){
     }, uuidv4)
     data.risuBardWikiPromptPresets = wikiPromptState.presets
     data.risuBardChatWikiPromptPresetId = wikiPromptState.chatPresetId
+    const grimoirePromptState = normalizeBardLoreInstructionPresetState({
+        presets: data.risuBardGrimoirePromptPresets,
+        activePresetId: data.risuBardGrimoirePromptPresetId,
+    })
+    data.risuBardGrimoirePromptPresets = grimoirePromptState.presets
+    data.risuBardGrimoirePromptPresetId = grimoirePromptState.activePresetId
     for(const char of data.characters){
         if(char.bardLore){
             const normalizedBardLore = normalizeBardLoreOwnerState(
@@ -1090,19 +1106,21 @@ export function setCurrentChat(chat:Chat){
 }
 
 /**
- * Defaults seeded into a freshly created (empty) chat. The model-mode fields make the
- * "default model mode for new chats" preference (useModelPresetByDefault)
- * apply AT BIRTH — a snapshot, not a runtime fallback. A runtime fallback
- * would retroactively flip every existing chat that never chose a mode, and
- * couple un-opened chats live to db.defaultModelBinding. Snapshotting here keeps
- * each chat independent. Returns {} when the default is legacy (leave the field
- * absent → classic), so existing chats are unaffected. Spread into new Chat
- * literals. Do NOT call for hydration placeholders or chats being restored with
- * their own mode.
+ * Defaults seeded into a freshly created (empty) chat. Persona selection inherits
+ * the previous chat when supplied, otherwise it snapshots the selected global
+ * persona. Model-mode fields similarly apply at birth instead of coupling existing
+ * chats to later global changes. Spread into new Chat literals. Do not call for
+ * chats being restored with their own state.
  */
-export function newChatModelDefaults(): Partial<Pick<Chat, 'useModelPreset' | 'modelBinding' | 'supaMemory'>> {
+export function newChatModelDefaults(
+    character?: character | null,
+    previousChat?: Pick<Chat, 'bindedPersona'> | null,
+): Partial<Pick<Chat, 'useModelPreset' | 'modelBinding' | 'supaMemory' | 'bindedPersona'>> {
     const db = getDatabase()
-    const defaults = { supaMemory: false }
+    const defaults = {
+        supaMemory: false,
+        bindedPersona: getNewChatPersonaBinding(db, character, previousChat),
+    }
     if (!db.useModelPresetByDefault) return defaults
     const def = db.defaultModelBinding
     return {
@@ -1491,6 +1509,8 @@ export interface Database{
     togglePresets?:TogglePreset[]
     personaBuilderPromptPresets?:PersonaBuilderPromptPreset[]
     loreBuilderPromptPresets?:LoreBuilderPromptPreset[]
+    personaBuilderStylePromptPresetId?:string
+    loreBuilderStylePromptPresetId?:string
     sdProvider: string
     webUiUrl:string
     sdSteps:number
@@ -1713,12 +1733,15 @@ export interface Database{
         yRatio: number
     }>
     risuBardModelMode?: 'memory' | 'model'
+    risuBardBardChanEnabled?: boolean
+    risuBardBardChanModelMode?: 'memory' | 'model'
     risuBardAutoWikiEnabled?: boolean
     risuBardWikiMarkdownPreview?: boolean
     risuBardRecentMessageCount?: number
     risuBardResponseMessageCount?: number
     risuBardResponseIncludeUserMessages?: boolean
     risuBardResponseExcludeUserMessages?: boolean
+    risuBardAnalysisExcludeUserMessages?: boolean
     risuBardAnalysisTokenLimit?: number
     risuBardAdditionalSearchLimit?: number
     risuBardCanonicalTargetLimit?: number
@@ -1743,6 +1766,8 @@ export interface Database{
     risuBardArcPlotterCustomPresets?: ArcPlotterPreset[]
     risuBardWikiPromptPresets?: WikiPromptPreset[]
     risuBardChatWikiPromptPresetId?: string
+    risuBardGrimoirePromptPresets?: BardLoreInstructionPreset[]
+    risuBardGrimoirePromptPresetId?: string
     textAreaTextSize:number
     combineTranslation:boolean
     dynamicAssets:boolean
@@ -2006,6 +2031,7 @@ export interface Database{
     autoScrollToNewMessage?: boolean
     alwaysScrollToNewMessage?: boolean
     preserveChatScrollPosition?: boolean
+    pinChatScrollNavigator?: boolean
     newMessageButtonStyle?: string
     pluginDevelopMode?: boolean
     echoMessage?:string

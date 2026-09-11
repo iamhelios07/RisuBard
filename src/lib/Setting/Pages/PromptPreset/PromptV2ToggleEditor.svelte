@@ -1,19 +1,28 @@
 <script lang="ts">
-    import { CheckIcon, ClipboardIcon, ListFilterIcon, SlidersHorizontalIcon } from '@lucide/svelte'
+    import { CheckIcon, ChevronDownIcon, ChevronRightIcon, ClipboardIcon, ListFilterIcon, SlidersHorizontalIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import { parsePromptV2ToggleTree, type PromptV2ToggleDefinition } from 'src/ts/promptV2'
+    import { parsePromptV2ToggleTree, type PromptV2ToggleDefinition, type PromptV2ToggleUsage } from 'src/ts/promptV2'
     import TextAreaInput from 'src/lib/UI/GUI/TextAreaInput.svelte'
 
     let {
         view,
         template = $bindable(),
+        usages = {},
+        onOpenUsage = () => {},
+        scrollTop = 0,
+        onScrollTopChange = () => {},
     }: {
         view: 'library' | 'source'
         template: string
+        usages?: Record<string, PromptV2ToggleUsage[]>
+        onOpenUsage?: (usage: PromptV2ToggleUsage) => void
+        scrollTop?: number
+        onScrollTopChange?: (scrollTop: number) => void
     } = $props()
 
     let search = $state('')
     let copiedKey = $state('')
+    let expandedKeys = $state(new Set<string>())
     let copyTimer: ReturnType<typeof setTimeout> | undefined
     const tree = $derived(parsePromptV2ToggleTree(template))
     const visibleDefinitions = $derived.by(() => {
@@ -32,6 +41,13 @@
         copiedKey = definition.key
         if (copyTimer) clearTimeout(copyTimer)
         copyTimer = setTimeout(() => copiedKey = '', 1400)
+    }
+
+    function toggleExpanded(key: string) {
+        const next = new Set(expandedKeys)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        expandedKeys = next
     }
 </script>
 
@@ -61,23 +77,61 @@
             {#if visibleDefinitions.length > 0}
                 <div class="flex flex-col gap-1">
                     {#each visibleDefinitions as definition (definition)}
-                        <button
-                            type="button"
-                            class="group flex min-h-14 w-full items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-darkborderc hover:bg-selected/25 focus-visible:border-borderc focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-borderc/50"
-                            onclick={() => copyKey(definition)}
-                            title={language.promptV2.copyKey}
-                        >
-                            <div class="min-w-0 grow">
-                                <div class="truncate text-sm font-medium">{definition.label}</div>
-                                <div class="mt-0.5 truncate font-mono text-[11px] text-textcolor2">{definition.key}</div>
-                                {#if definition.group}<div class="mt-0.5 truncate text-[11px] text-textcolor2">{definition.group}</div>{/if}
+                        {@const definitionUsages = usages[definition.key] ?? []}
+                        <div class="overflow-hidden rounded-lg border border-transparent hover:border-darkborderc">
+                            <div class="group flex min-h-14 items-stretch">
+                                <button
+                                    type="button"
+                                    data-prompt-v2-variable={definition.key}
+                                    class="flex min-w-0 grow items-center gap-2 px-2.5 py-2 text-left hover:bg-selected/25 focus-visible:bg-selected/25 focus-visible:outline-none"
+                                    aria-expanded={expandedKeys.has(definition.key)}
+                                    onclick={() => toggleExpanded(definition.key)}
+                                >
+                                    {#if expandedKeys.has(definition.key)}
+                                        <ChevronDownIcon size={15} class="shrink-0 text-borderc" />
+                                    {:else}
+                                        <ChevronRightIcon size={15} class="shrink-0 text-textcolor2" />
+                                    {/if}
+                                    <div class="min-w-0 grow">
+                                        <div class="truncate text-sm font-medium">{definition.label}</div>
+                                        <div class="mt-0.5 truncate font-mono text-[11px] text-textcolor2">{definition.key}</div>
+                                        {#if definition.group}<div class="mt-0.5 truncate text-[11px] text-textcolor2">{definition.group}</div>{/if}
+                                    </div>
+                                    <span class="min-w-6 shrink-0 rounded-full bg-darkbutton px-1.5 py-0.5 text-center text-[11px] tabular-nums text-textcolor2">{definitionUsages.length}</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="grid w-9 shrink-0 place-content-center text-textcolor2 hover:bg-selected/25 hover:text-textcolor focus-visible:outline-2 focus-visible:outline-borderc"
+                                    onclick={() => copyKey(definition)}
+                                    title={language.promptV2.copyKey}
+                                    aria-label={language.promptV2.copyKey}
+                                >
+                                    {#if copiedKey === definition.key}
+                                        <CheckIcon size={15} class="text-success" />
+                                    {:else}
+                                        <ClipboardIcon size={15} class="opacity-55 group-hover:opacity-100" />
+                                    {/if}
+                                </button>
                             </div>
-                            {#if copiedKey === definition.key}
-                                <CheckIcon size={15} class="shrink-0 text-success" />
-                            {:else}
-                                <ClipboardIcon size={15} class="shrink-0 text-textcolor2 opacity-50 group-hover:opacity-100" />
+                            {#if expandedKeys.has(definition.key) && definitionUsages.length > 0}
+                                <div class="border-t border-darkborderc bg-darkbg/55 py-1 pl-6 pr-1.5">
+                                    {#each definitionUsages as usage}
+                                        <button
+                                            type="button"
+                                            data-prompt-v2-usage
+                                            class="block w-full rounded-md px-2 py-1.5 text-left hover:bg-selected/30 focus-visible:bg-selected/30 focus-visible:outline-none"
+                                            onclick={() => onOpenUsage(usage)}
+                                        >
+                                            <span class="flex items-baseline justify-between gap-2 text-xs">
+                                                <span class="truncate font-medium text-textcolor">{usage.blockName}</span>
+                                                <span class="shrink-0 text-[10px] tabular-nums text-borderc">{language.promptV2.lineNumber(usage.line)}</span>
+                                            </span>
+                                            <span class="mt-0.5 block truncate font-mono text-[10px] leading-relaxed text-textcolor2">{usage.preview}</span>
+                                        </button>
+                                    {/each}
+                                </div>
                             {/if}
-                        </button>
+                        </div>
                     {/each}
                 </div>
             {:else}
@@ -106,6 +160,8 @@
                 optimaizedInput={false}
                 placeholder={language.promptV2.toggleSourcePlaceholder}
                 popupLanguage="plaintext"
+                {scrollTop}
+                {onScrollTopChange}
             />
         </div>
     </section>

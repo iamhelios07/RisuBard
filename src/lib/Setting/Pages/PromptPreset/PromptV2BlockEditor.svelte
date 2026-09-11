@@ -42,12 +42,22 @@
         item,
         definitions,
         previewValues,
+        scrollTop = 0,
+        readOnly = false,
+        simple = false,
+        critical = false,
+        onScrollTopChange = () => {},
         onReplace,
         onOpenToggleSetup,
     }: {
         item?: PromptItem
         definitions: PromptV2ToggleDefinition[]
         previewValues: Record<string, string>
+        scrollTop?: number
+        readOnly?: boolean
+        simple?: boolean
+        critical?: boolean
+        onScrollTopChange?: (scrollTop: number) => void
         onReplace: (item: PromptItem) => void
         onOpenToggleSetup: () => void
     } = $props()
@@ -74,6 +84,7 @@
     let pendingVisualItem: PromptItem | undefined
     let pendingVisualBody: string | undefined
     let pendingVisualActivation: PromptV2Activation | null = null
+    let currentScrollTop = $state(0)
 
     const visualBodyCommitDelay = 750
 
@@ -90,7 +101,19 @@
         lastSearch = { item, query }
     }
 
+    export async function revealBodyRange(start: number, end: number) {
+        await tick()
+        if (editorMode === 'source') {
+            if (!bodyField) return
+            revealTextareaMatch(bodyField, { start, end })
+            if (bodyPreviewElement) bodyPreviewElement.scrollTop = bodyField.scrollTop
+        } else {
+            visualBodyField?.focusSelection(start, end)
+        }
+    }
+
     export function replaceCurrentBodyMatch(search: string, replacement: string): boolean {
+        if (readOnly) return false
         const query = search.trim()
         const currentItem = pendingVisualItem ?? item
         const body = pendingVisualBody ?? bodyField?.value ?? parsedText?.body
@@ -144,6 +167,19 @@
     })
 
     $effect(() => {
+        currentScrollTop = scrollTop
+    })
+
+    $effect(() => {
+        const field = bodyField
+        const position = currentScrollTop
+        if (field && field.scrollTop !== position) {
+            field.scrollTop = position
+            if (bodyPreviewElement) bodyPreviewElement.scrollTop = position
+        }
+    })
+
+    $effect(() => {
         if (bodySyntaxConditions.length === 0 && definitions[0]) {
             bodySyntaxConditions = [{ key: definitions[0].key, operator: 'is', value: defaultValue(definitions[0]) }]
         }
@@ -158,6 +194,10 @@
     }
 
     export function flushPendingText() {
+        if (readOnly) {
+            cancelPendingVisualCommit()
+            return
+        }
         if (!pendingVisualItem || pendingVisualBody === undefined) return
         if (visualBodyCommitTimer) clearTimeout(visualBodyCommitTimer)
         visualBodyCommitTimer = undefined
@@ -171,6 +211,7 @@
     onDestroy(flushPendingText)
 
     function patchItem(patch: Record<string, unknown>) {
+        if (readOnly) return
         const current = pendingVisualItem && pendingVisualBody !== undefined
             ? buildTextItem(pendingVisualBody, pendingVisualActivation, pendingVisualItem)
             : item
@@ -180,7 +221,7 @@
     }
 
     async function beginNameEdit() {
-        if (!item) return
+        if (!item || readOnly) return
         draftName = item.name ?? ''
         editingName = true
         await tick()
@@ -218,6 +259,7 @@
     }
 
     function applyText(body: string, activation: PromptV2Activation | null = parsedText?.activation ?? null) {
+        if (readOnly) return
         const next = buildTextItem(body, activation)
         if (!next) return
         cancelPendingVisualCommit()
@@ -225,7 +267,7 @@
     }
 
     function scheduleVisualText(body: string) {
-        if (!item || !textSource || !parsedText?.editable) return
+        if (readOnly || !item || !textSource || !parsedText?.editable) return
         if (visualBodyCommitTimer) clearTimeout(visualBodyCommitTimer)
         pendingVisualItem ??= item
         pendingVisualBody = body
@@ -238,7 +280,7 @@
     }
 
     function enableConditions() {
-        if (!parsedText?.editable || parsedText.activation || definitions.length === 0) return
+        if (readOnly || !parsedText?.editable || parsedText.activation || definitions.length === 0) return
         const definition = definitions[0]
         applyText(currentBody(), {
             join: 'and',
@@ -247,7 +289,7 @@
     }
 
     function updateActivation(patch: Partial<PromptV2Activation>) {
-        if (!parsedText?.activation) return
+        if (readOnly || !parsedText?.activation) return
         applyText(currentBody(), { ...parsedText.activation, ...patch })
     }
 
@@ -265,7 +307,7 @@
     }
 
     function addCondition(definition = definitions[0]) {
-        if (!definition || !parsedText?.editable) return
+        if (readOnly || !definition || !parsedText?.editable) return
         if (!parsedText.activation) {
             applyText(currentBody(), {
                 join: 'and',
@@ -282,7 +324,7 @@
     }
 
     function removeCondition(index: number) {
-        if (!parsedText?.activation) return
+        if (readOnly || !parsedText?.activation) return
         const conditions = parsedText.activation.conditions.filter((_, conditionIndex) => conditionIndex !== index)
         if (conditions.length === 0) {
             applyText(currentBody(), null)
@@ -338,7 +380,7 @@
     }
 
     async function insertBodyCondition() {
-        if (!parsedText || bodySyntaxConditions.length === 0) return
+        if (readOnly || !parsedText || bodySyntaxConditions.length === 0) return
         const result = insertPromptV2BodyCondition(
             currentBody(),
             bodySelection.start,
@@ -358,6 +400,7 @@
     }
 
     function replaceType(type: PromptType) {
+        if (readOnly) return
         const current = pendingVisualItem && pendingVisualBody !== undefined
             ? buildTextItem(pendingVisualBody, pendingVisualActivation, pendingVisualItem)
             : item
@@ -404,10 +447,13 @@
     }
 
     function syncBodyPreviewScroll(event: Event) {
-        if (!bodyPreviewElement) return
         const field = event.currentTarget as HTMLTextAreaElement
-        bodyPreviewElement.scrollTop = field.scrollTop
-        bodyPreviewElement.scrollLeft = field.scrollLeft
+        currentScrollTop = field.scrollTop
+        onScrollTopChange(field.scrollTop)
+        if (bodyPreviewElement) {
+            bodyPreviewElement.scrollTop = field.scrollTop
+            bodyPreviewElement.scrollLeft = field.scrollLeft
+        }
     }
 </script>
 
@@ -430,14 +476,22 @@
                         }}
                     />
                 {:else}
-                    <button data-prompt-v2-name type="button" class="editor-title-button" onclick={beginNameEdit} title={language.name}>
+                    <button
+                        data-prompt-v2-name
+                        type="button"
+                        class="editor-title-button"
+                        class:editor-title-button--critical={critical}
+                        disabled={readOnly}
+                        onclick={beginNameEdit}
+                        title={language.name}
+                    >
                         <span class="truncate">{item.name?.trim() || language.promptV2.editor}</span>
-                        <PencilIcon size={13} />
+                        {#if !readOnly}<PencilIcon size={13} />{/if}
                     </button>
                 {/if}
             </div>
 
-            <div data-prompt-v2-header-fields class="editor-header-fields">
+            {#if !simple}<div data-prompt-v2-header-fields class="editor-header-fields">
                 <label>
                     <span>{language.type}</span>
                     <select value={item.type} onchange={(event) => replaceType(event.currentTarget.value as PromptType)}>
@@ -493,12 +547,12 @@
                         </select>
                     </label>
                 {/if}
-            </div>
+            </div>{/if}
         </header>
 
         {#if textSource && parsedText}
         <div class="editor-toolbar">
-            {#if textSource && parsedText?.editable}
+            {#if textSource && parsedText?.editable && !readOnly}
                 <div class="toolbar-control">
                     <ShButton size="sm" variant="secondary" onclick={() => activationDialogOpen = true}>
                         <SlidersHorizontalIcon size={15} />
@@ -770,6 +824,12 @@
                                 switchVariables={definitions.filter(definition => definition.type === 'switch').map(definition => definition.key)}
                                 previewSegments={bodyPreviewSegments}
                                 showVariableSidebar={false}
+                                allowBlockActions
+                                scrollTop={currentScrollTop}
+                                onScrollTopChange={(position) => {
+                                    currentScrollTop = position
+                                    onScrollTopChange(position)
+                                }}
                                 onSelectionChange={updateBodySelection}
                             />
                         </div>
@@ -779,7 +839,7 @@
                             class:prompt-body-editor--active={previewState === true}
                             class:prompt-body-editor--inactive={previewState === false}
                         >
-                            {#if hasBodyPreview}
+                            {#if hasBodyPreview && !bodyFieldFocused}
                                 <pre class="prompt-body-preview" bind:this={bodyPreviewElement} aria-hidden="true">{#each bodyPreviewSegments as segment}<span
                                     class:prompt-body-preview-text--active={segment.state === 'active'}
                                     class:prompt-body-preview-text--inactive={segment.state === 'inactive'}
@@ -793,7 +853,7 @@
                                 class:prompt-body-field--active={previewState === true}
                                 class:prompt-body-field--inactive={previewState === false}
                                 value={parsedText.body}
-                                readonly={!parsedText.editable}
+                                readonly={readOnly || !parsedText.editable}
                                 spellcheck="false"
                                 onfocus={() => { bodyFieldFocused = true }}
                                 onblur={() => { bodyFieldFocused = false }}
@@ -879,6 +939,8 @@
     }
 
     .editor-title-button { display: flex; align-items: center; gap: .4rem; cursor: text; }
+    .editor-title-button:disabled { cursor: default; opacity: 1; }
+    .editor-title-button--critical { color: var(--color-danger); }
     .editor-title-button :global(svg) { flex-shrink: 0; color: var(--color-textcolor2); opacity: 0; }
     .editor-title-button:hover { border-color: var(--color-darkborderc); background: color-mix(in srgb, var(--color-selected) 24%, transparent); }
     .editor-title-button:hover :global(svg), .editor-title-button:focus-visible :global(svg) { opacity: 1; }

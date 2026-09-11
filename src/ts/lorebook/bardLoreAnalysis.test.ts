@@ -208,6 +208,7 @@ describe('Bard Lore AI analysis', () => {
             entries: [{
                 ref: 0,
                 kind: 'location',
+                activation: 'retrieve',
                 aliases: ['', ' 탑 ', '탑'],
                 tags: ['', ' 던전 ', '던전'],
                 summary: '위험한 탑',
@@ -300,10 +301,21 @@ describe('Bard Lore AI analysis', () => {
             .toThrow('bard-lore-analysis-invalid:invalid-json')
         expect(() => parseBardLoreAnalysisResponse('{"entries":[]}', [source], [source]))
             .toThrow('bard-lore-analysis-invalid:missing-targets')
+        expect(() => parseBardLoreAnalysisResponse(JSON.stringify({
+            entries: [{
+                ref: 0,
+                kind: 'location',
+                aliases: [],
+                tags: [],
+                summary: '',
+                links: [],
+            }],
+        }), [source], [source])).toThrow('bard-lore-analysis-invalid:entry-shape')
         expect(parseBardLoreAnalysisResponse(JSON.stringify({
             entries: [{
                 ref: 0,
                 kind: 'location',
+                activation: 'retrieve',
                 aliases: [],
                 tags: [],
                 summary: '',
@@ -315,6 +327,7 @@ describe('Bard Lore AI analysis', () => {
             entries: [{
                 ref: 0,
                 kind: 'location',
+                activation: 'retrieve',
                 aliases: [],
                 tags: [],
                 summary: '',
@@ -344,6 +357,36 @@ describe('Bard Lore AI analysis', () => {
         }
 
         expect(auditBardLoreAnalysisDraft(incomplete, [character], settings).issues).toEqual([])
+    })
+
+    it('classifies mandatory output contracts as required and applies the approved activation', () => {
+        const status = entry('status-output-rule')
+        status.comment = '상태창 출력 규칙'
+        status.content = '모든 응답 끝에 상태창을 출력한다.'
+        const prompt = buildBardLoreAnalysisPrompt([status], [status])
+
+        expect(JSON.parse(bardLoreAnalysisSchema).properties.entries.items.required).toContain('activation')
+        expect(prompt).toContain('status display')
+        expect(prompt).toContain('"activation":"retrieve"')
+
+        const parsed = parseBardLoreAnalysisResponse(JSON.stringify({
+            entries: [{
+                ref: 0,
+                kind: 'system',
+                activation: 'required',
+                aliases: ['상태창'],
+                tags: ['출력 규칙'],
+                summary: '모든 응답에 적용되는 상태창 출력 규칙.',
+                facets: [],
+                injection: 'full',
+                atoms: [],
+                links: [],
+            }],
+        }), [status], [status])
+        const applied = applyBardLoreAnalysisDraft([status], parsed, { overwriteExisting: false })
+
+        expect(parsed.entries[0].activation).toBe('required')
+        expect(applied.entries[0].bard.activation).toBe('required')
     })
 
     it('treats long timelines as routing indexes that need atomic event drafts', () => {
@@ -448,6 +491,7 @@ describe('Bard Lore AI analysis', () => {
                 entries: [{
                     ref: 0,
                     kind: 'location',
+                    activation: 'retrieve',
                     aliases: ['탑'],
                     tags: ['던전'],
                     summary: '위험한 탑',
@@ -550,6 +594,7 @@ describe('Bard Lore AI analysis', () => {
             entries: [{
                 ref: 0,
                 kind: 'other',
+                activation: 'retrieve',
                 aliases: [],
                 tags: ['명부'],
                 summary: '인물 목록',
@@ -617,6 +662,7 @@ describe('Bard Lore AI analysis', () => {
             entries: [{
                 ref: 0,
                 kind: 'other',
+                activation: 'retrieve',
                 aliases: [],
                 tags: ['명부'],
                 summary: '인물 목록',

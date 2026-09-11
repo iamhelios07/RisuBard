@@ -10,6 +10,7 @@ afterEach(async () => {
     if (mounted) await unmount(mounted)
     mounted = undefined
     document.body.replaceChildren()
+    vi.restoreAllMocks()
 })
 
 describe('CBS visual condition editor', () => {
@@ -106,5 +107,67 @@ describe('CBS visual condition editor', () => {
 
         expect(document.querySelector('[data-cbs-warning]')).not.toBeNull()
         expect(document.querySelector('[data-cbs-summary]')?.textContent).toContain('{{unknown::a::b}}')
+    })
+
+    it('deletes or cuts a complete nested condition block', async () => {
+        const source = 'Before{{#if 1}}Outer{{#if 2}}Inner{{/if}}Tail{{/if}}After'
+        const onInput = vi.fn()
+        const writeText = vi.fn().mockResolvedValue(undefined)
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+        mounted = mount(CbsConditionView, {
+            target: document.body,
+            props: { value: source, onInput, showVariableSidebar: false, allowBlockActions: true },
+        })
+        await tick()
+
+        const cutButtons = document.querySelectorAll<HTMLButtonElement>('[data-cbs-cut-condition]')
+        expect(cutButtons).toHaveLength(2)
+        cutButtons[1].click()
+        await tick()
+        expect(writeText).toHaveBeenCalledWith('{{#if 2}}Inner{{/if}}')
+        expect(onInput).toHaveBeenLastCalledWith('Before{{#if 1}}OuterTail{{/if}}After')
+
+        await unmount(mounted)
+        mounted = mount(CbsConditionView, {
+            target: document.body,
+            props: { value: source, onInput, showVariableSidebar: false, allowBlockActions: true },
+        })
+        await tick()
+        document.querySelector<HTMLButtonElement>('[data-cbs-delete-condition]')!.click()
+        await tick()
+        expect(onInput).toHaveBeenLastCalledWith('BeforeAfter')
+    })
+
+    it('drags one complete condition after another without breaking either block', async () => {
+        const source = 'A{{#if 1}}One{{/if}}B{{#if 2}}Two{{/if}}C'
+        const onInput = vi.fn()
+        mounted = mount(CbsConditionView, {
+            target: document.body,
+            props: { value: source, onInput, showVariableSidebar: false, allowBlockActions: true },
+        })
+        await tick()
+
+        const blocks = document.querySelectorAll<HTMLElement>('[data-cbs-block]')
+        expect(blocks[0].getAttribute('draggable')).toBe('true')
+        blocks[0].dispatchEvent(new Event('dragstart', { bubbles: true }))
+        const drop = new Event('drop', { bubbles: true, cancelable: true })
+        Object.defineProperty(drop, 'clientY', { value: 1 })
+        blocks[1].dispatchEvent(drop)
+        await tick()
+
+        expect(onInput).toHaveBeenLastCalledWith('AB{{#if 2}}Two{{/if}}{{#if 1}}One{{/if}}C')
+    })
+
+    it('focuses a visual condition heading when a revealed range is inside its expression', async () => {
+        const source = 'Before{{#if {{equal::{{getglobalvar::toggle_enabled}}::1}}}}Body{{/if}}After'
+        mounted = mount(CbsConditionView, {
+            target: document.body,
+            props: { value: source, onInput: vi.fn(), showVariableSidebar: false, allowBlockActions: true },
+        })
+        await tick()
+
+        const start = source.indexOf('toggle_enabled')
+        mounted.focusSelection(start, start + 'toggle_enabled'.length)
+        expect(document.activeElement).toBe(document.querySelector('[data-cbs-condition-heading]'))
     })
 })

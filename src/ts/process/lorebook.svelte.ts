@@ -87,7 +87,8 @@ export function addLorebookFolder(type:number) {
 export async function loadLoreBookV3Prompt(search?: { character: character; text: string }){
     const char = search?.character ?? DBState.db.characters[get(selectedCharID)]
     const page = char.chatPage
-    const currentChat: Message[] = search ? [{ role: 'user', data: search.text }] : char.chats[page].message
+    const currentChatState = char.chats[page]
+    const currentChat: Message[] = search ? [{ role: 'user', data: search.text }] : currentChatState.message
     const loreDepth = search ? 1 : (char.loreSettings?.scanDepth ?? DBState.db.loreBookDepth)
     const characterScopeId = `character:${char.chaId}`
     const bardSelectedIds = new Set<string>()
@@ -109,10 +110,22 @@ export async function loadLoreBookV3Prompt(search?: { character: character; text
         const disabledThrough = currentChat.findLastIndex((message) => message.disabled === 'allBefore')
         const activeMessages = currentChat.slice(disabledThrough + 1)
             .filter((message) => !message.disabled && !message.isComment)
-        const query = activeMessages
+        const recentMessages = activeMessages
             .slice(Math.max(0, activeMessages.length - bardSettings.contextMessages))
             .map((message) => message.data)
-            .join('\n')
+        const selectedGreeting = !search
+            && disabledThrough < 0
+            && bardSettings.contextMessages > 0
+            && activeMessages.length <= bardSettings.contextMessages
+            && !currentChatState.firstMessageDisabled
+            ? (currentChatState.fmIndex ?? -1) === -1
+                ? char.firstMessage
+                : char.alternateGreetings?.[currentChatState.fmIndex ?? 0] ?? ''
+            : ''
+        const firstMessageEvidence = selectedGreeting
+            ? risuChatParser(selectedGreeting, { chara: char })
+            : ''
+        const query = [firstMessageEvidence, ...recentMessages].filter(Boolean).join('\n')
         let priorityQuery = ''
         for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
             const message = activeMessages[index]
@@ -124,6 +137,7 @@ export async function loadLoreBookV3Prompt(search?: { character: character; text
         const selection = selectBardLoreEntries({
             query,
             priorityQuery,
+            routingEvidence: firstMessageEvidence,
             entries: bardEntries,
             tokenCounts,
             settings: bardSettings,

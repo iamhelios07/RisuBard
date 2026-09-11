@@ -253,10 +253,12 @@ export function planBardLoreQuery(
     index: BardLoreCompiledIndex,
     settings: BardLoreSettings,
     scopeAliases: string[] = [],
+    routingEvidence = '',
 ): BardLoreQueryPlan {
     const query = normalize(value)
+    const anchorQuery = normalize([value, routingEvidence].filter(Boolean).join('\n'))
     const scopeMatches = scopeAliases
-        .filter((phrase): phrase is string => typeof phrase === 'string' && includesPhrase(query, phrase))
+        .filter((phrase): phrase is string => typeof phrase === 'string' && includesPhrase(anchorQuery, phrase))
         .sort((left, right) => right.length - left.length)
     const targetKinds = (Object.keys(settings.router.kindAliases) as BardLoreKind[]).filter((kind) =>
         settings.router.kindAliases[kind].some((phrase) => includesFilterPhrase(query, phrase)),
@@ -320,9 +322,9 @@ export function planBardLoreQuery(
     const constraintPhrases = constraints.map((constraint) => constraint.phrase)
     for (const entry of index.entries) {
         const matches = phrases(entry)
-            .filter((phrase) => includesPhrase(query, phrase)
-                && !coveredByPhrase(query, phrase, constraintPhrases)
-                && !coveredByPhrase(query, phrase, scopeMatches, true))
+            .filter((phrase) => includesPhrase(anchorQuery, phrase)
+                && !coveredByPhrase(anchorQuery, phrase, constraintPhrases)
+                && !coveredByPhrase(anchorQuery, phrase, scopeMatches, true))
             .sort((left, right) => right.length - left.length)
         if (matches[0]) anchors.push({ entryId: entry.id, phrase: matches[0] })
     }

@@ -89,6 +89,39 @@ describe('Grimoire live prompt retrieval', () => {
         expect(result.actives.some((active) => active.prompt === 'DISABLED PROFILE')).toBe(false)
         expect(result.matchLog.find((log) => log.source === 'Grimoire query plan')?.prompt).toBe('카이넬 레오를 만난다.')
     })
+
+    it('uses the active first message to bootstrap ambient scene retrieval in a new chat', async () => {
+        mockModuleSources.length = 0
+        const sources = [
+            { ...lore('학교', '학교', 'SCHOOL FACT'), id: 'school' },
+            { ...lore('신입생', '', 'STUDENT PROFILE'), id: 'student' },
+        ]
+        const bardLore = upgradeLegacyLorebook(sources, () => 'unused', createBardLoreSettings({ contextMessages: 3 }))
+        bardLore.mode = 'bard'
+        bardLore.metadata[0].kind = 'location'
+        bardLore.metadata[1].kind = 'character'
+        bardLore.metadata[1].links = [{ targetId: 'school', relation: 'attends', retrieval: 'ambient' }]
+        const character = {
+            chaId: 'test',
+            name: 'test',
+            firstMessage: '학교 복도에서 새로운 하루가 시작된다.',
+            alternateGreetings: [],
+            chatPage: 0,
+            globalLore: sources,
+            bardLore,
+            chats: [{ id: 'chat', fmIndex: -1, localLore: [], message: [
+                { role: 'user', data: '주위를 둘러본다.' },
+            ] }],
+        }
+        mockDBState.db = { username: 'user', loreBookDepth: 3, loreBookToken: 8000, characters: [character] }
+
+        const result = await loadLoreBookV3Prompt()
+
+        expect(result.actives.map((entry) => entry.prompt)).toEqual(expect.arrayContaining([
+            'SCHOOL FACT',
+            'STUDENT PROFILE',
+        ]))
+    })
 })
 
 function deferred<T>() {

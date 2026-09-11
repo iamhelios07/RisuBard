@@ -168,7 +168,7 @@ Test pointer/keyboard resize, reset-on-double-click, separator roles/orientation
 ### Task 5: Documentation, patch note, and final commit
 
 **Files:**
-- Modify: `E:/Risuwork/JellyBard/project_wiki/bard_lore_architecture.md`
+- Modify: `../project_wiki/bard_lore_architecture.md`
 - Modify: `docs/ko/grimoire-ai-analysis.md`
 - Modify: `patchnote/0.9.30.md`
 

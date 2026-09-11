@@ -17,22 +17,21 @@
     let open = $state(true)
     const copy = $derived(language.chatModuleActivation)
     const character = $derived(DBState.db.characters[$selectedCharID])
-    const chat = $derived(character?.chats?.[character.chatPage])
     const persona = $derived((character ? checkPersonaBinded() : null)
         ?? DBState.db.personas?.[DBState.db.selectedPersona ?? 0])
     const items = $derived(DBState.db.modules.map((module) => ({
         id: module.id, title: module.name, detail: module.description,
     })))
 
-    function toggleModule(moduleId: string, scope: 'global' | 'chat') {
-        if (alertMode || (scope === 'chat' && !chat)) return
+    function toggleModule(moduleId: string, scope: 'global' | 'character') {
+        if (alertMode || (scope === 'character' && !character)) return
         if (scope === 'global') {
             const ids = DBState.db.enabledModules ?? []
             DBState.db.enabledModules = ids.includes(moduleId)
                 ? ids.filter((id) => id !== moduleId) : [...ids, moduleId]
         } else {
-            const ids = chat.modules ?? []
-            chat.modules = ids.includes(moduleId)
+            const ids = character.modules ?? []
+            character.modules = ids.includes(moduleId)
                 ? ids.filter((id) => id !== moduleId) : [...ids, moduleId]
         }
         $ReloadGUIPointer += 1
@@ -59,7 +58,6 @@
             {@const module = DBState.db.modules.find((item) => item.id === moduleId)}
             {#if module}
                 {@const globalEnabled = DBState.db.enabledModules?.includes(moduleId) ?? false}
-                {@const chatEnabled = chat?.modules?.includes(moduleId) ?? false}
                 {@const characterEnabled = character?.modules?.includes(moduleId) ?? false}
                 {@const personaEnabled = (persona?.id && DBState.db.personaEnabledModules?.[persona.id]?.includes(moduleId)) || persona?.embeddedModule?.id === moduleId}
                 <div class="chat-module-row">
@@ -69,8 +67,8 @@
                             <strong>{module.name}</strong>
                         </div>
                         {#if module.description}<p>{module.description}</p>{/if}
-                        {#if !alertMode && (characterEnabled || personaEnabled)}
-                            <p class="chat-module-inherited">{characterEnabled ? copy.characterEnabled : copy.personaEnabled}</p>
+                        {#if !alertMode && personaEnabled}
+                            <p class="chat-module-inherited">{copy.personaEnabled}</p>
                         {/if}
                     </div>
                     {#if alertMode}
@@ -85,9 +83,9 @@
                                 </button>
                             </div>
                             <div class="chat-module-scope">
-                                <button type="button" class="chat-module-toggle" class:active={chatEnabled}
-                                    aria-label={module.name + ': ' + copy.chat} aria-pressed={chatEnabled} disabled={!chat}
-                                    title={chat ? copy.chatHint : copy.noChat} onclick={() => toggleModule(moduleId, 'chat')}>
+                                <button type="button" class="chat-module-toggle" class:active={characterEnabled}
+                                    aria-label={module.name + ': ' + copy.chat} aria-pressed={characterEnabled} disabled={!character}
+                                    title={character ? copy.chatHint : copy.noChat} onclick={() => toggleModule(moduleId, 'character')}>
                                     <MessageSquareIcon size={19.2}/>
                                 </button>
                             </div>

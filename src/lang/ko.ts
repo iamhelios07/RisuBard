@@ -569,6 +569,10 @@ export const languageKorean = {
   risubardMemoryConfirmed: "메모리 확정됨",
   risubardMemoryAlreadyConfirmed: "이미 확정된 메모리",
   risubardMemoryConfirmFailed: "메모리 확정 실패",
+  risubardReanalyzeTurn: "이 턴 바드위키 재분석",
+  risubardReanalyzingTurn: "이 턴을 재분석하는 중...",
+  risubardReanalyzedTurn: "이 턴의 사건과 정본을 다시 분석했습니다",
+  risubardReanalyzeFailed: "이 턴 재분석 실패",
   yes: "예",
   no: "아니오",
   goback: "뒤로",
@@ -1085,6 +1089,15 @@ export const languageKorean = {
   chatPagePrevious: "이전",
   chatPageNext: "다음",
   chatPageLatest: "최신",
+  chatPageTop: "현재 페이지 맨 위",
+  chatPageBottom: "현재 페이지 맨 아래",
+  chatMessagePrevious: "이전 메시지",
+  chatMessageNext: "다음 메시지",
+  chatPageJumpLabel: "페이지",
+  chatPageJumpAria: "페이지로 이동",
+  chatTurnLabel: "턴",
+  chatTurnJumpAria: "턴으로 이동",
+  chatPageTurnJumpAria: "지정한 페이지와 턴으로 이동",
   chatFirstMessageCollapse: "첫 메시지 접기",
   chatFirstMessageExpand: "첫 메시지 펼치기",
   removeCharacter: "캐릭터 삭제",
@@ -1118,8 +1131,32 @@ export const languageKorean = {
   characterPackageProgressImportChar: "캐릭터 가져오는 중...",
   characterPackageProgressImportPersona: "페르소나 가져오는 중...",
   characterPackageProgressImportChats: "채팅 가져오는 중...",
-  characterPackageProgressImportGallery: "갤러리 가져오는 중...",
-  characterPackageProgressImportInlays: "인레이 가져오는 중",
+    characterPackageProgressImportGallery: "갤러리 가져오는 중...",
+    characterPackageProgressImportInlays: "인레이 가져오는 중",
+  characterImportReading: "캐릭터 파일 읽는 중...",
+  characterImportReadingBytes: (completed: string, total: string) =>
+    `캐릭터 파일 읽는 중... (${completed} / ${total})`,
+  characterImportScanning: (count: number) =>
+    `압축 항목 확인 중... (${count.toLocaleString()}개 발견)`,
+  characterImportExtracting: (completed: number, total: number) =>
+    `압축 해제 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportPreparingAssets: (completed: number, total: number) =>
+    `에셋 준비 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportSavingAssets: (completed: number, total: number) =>
+    `에셋 저장 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportReadingMetadata: "캐릭터 메타데이터 읽는 중...",
+  characterImportReadingModule: "내장 모듈 읽는 중...",
+  characterImportApplying: "캐릭터 데이터 적용 중...",
+  characterImportEmotions: (completed: number, total: number) =>
+    `감정 이미지 가져오는 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportAssets: (completed: number, total: number) =>
+    `캐릭터 에셋 연결 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportVoiceFiles: (completed: number, total: number) =>
+    `음성 파일 가져오는 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+  characterImportDownloading: "캐릭터 파일 다운로드 중...",
+  characterImportFailed: "캐릭터 파일을 가져오지 못했습니다.",
+  characterImportMissingAsset: (key: string) => `캐릭터 에셋을 찾을 수 없습니다: ${key}`,
+  characterImportDataUriTooLarge: "카드에 포함된 데이터 URI 에셋이 너무 큽니다.",
   characterPackageEmpty: "빈 껍데기",
   characterPackageEmptyWarning:
     "캐릭터 데이터가 비어 있습니다. 그래도 임포트할까요?",
@@ -1132,7 +1169,19 @@ export const languageKorean = {
   username: "유저 이름",
   userIcon: "유저 아이콘",
   successExport: "성공적으로 엑스포트하여 다운로드 경로에 다운로드했습니다.",
-  successImport: "성공적으로 임포트했습니다.",
+    successImport: "성공적으로 임포트했습니다.",
+  fileDropImport: {
+    moduleLoading: (fileName: string) => `모듈을 가져오는 중... (${fileName})`,
+    presetLoading: (fileName: string) => `프롬프트 프리셋을 가져오는 중... (${fileName})`,
+    pluginLoading: (fileName: string) => `플러그인을 가져오는 중... (${fileName})`,
+    moduleAssets: (completed: number, total: number) =>
+      `모듈 에셋을 가져오는 중... (${completed.toLocaleString()} / ${total.toLocaleString()})`,
+    moduleSuccess: "모듈 목록에 가져왔습니다.",
+    presetSuccess: "프롬프트 프리셋 목록에 가져왔습니다.",
+    pluginSuccess: "플러그인 목록에 가져왔습니다.",
+    failed: (fileName: string, reason: string) =>
+      `${fileName} 파일을 가져오지 못했습니다.${reason ? ` ${reason}` : ""}`,
+  },
   moduleCreated: "모듈이 생성되었습니다.",
   moduleUpdated: "모듈이 수정되었습니다.",
   moduleDeleted: "모듈이 삭제되었습니다.",
@@ -2209,6 +2258,7 @@ export const languageKorean = {
   translationCacheNextPage: "다음 페이지",
   translationCachePage: "{0} / {1} 페이지",
   loading: "로딩중",
+  loadingFeedback: { failed: '불러오기 실패', timeout: '응답 대기 시간 초과' },
   moduleBackToList: "모듈 목록으로 돌아가기",
   startupLoading: {
     title: "불러오는 중...",
@@ -2767,6 +2817,9 @@ export const languageKorean = {
   togglePinToChat: "현재 토글 값을 이 채팅에만 고정",
   togglePinLabel: "채팅에 고정",
   togglePinSaved: "토글 값이 이 채팅에 고정되었습니다.",
+  togglePinManage: "현재 설정으로 고정값을 덮어쓰거나 고정 해제",
+  togglePinOverwrite: "현재 설정으로 덮어쓰기",
+  togglePinUnpin: "고정 해제하고 전역 값 사용",
   togglePinManualName: "직접 설정",
   togglePinReset: "고정한 프리셋 값으로 되돌리기",
   togglePinResetDone: "토글 값이 고정한 프리셋으로 되돌아갔습니다.",
@@ -2876,6 +2929,7 @@ export const languageKorean = {
   nanoGPTManualInput: "수동 입력",
   nanoGPTManualModelSelect: "수동 모델 선택",
   nodeOnlyScrollButtonType: "스크롤 버튼 타입",
+  pinChatScrollNavigator: "사이드 네비게이터를 고정",
   scrollButtonTypeFour: "4버튼",
   scrollButtonTypeTwo: "2버튼",
   scrollButtonTypeOff: "사용 안 함",
@@ -2903,6 +2957,8 @@ export const languageKorean = {
     "QR 코드와 원격 링크를 절대로 다른 사람과 공유하지 마세요. 링크를 가진 누구나 서버에 자유롭게 접근할 수 있습니다. 실수로 공유한 경우, 원격 접속을 닫고 새 링크를 생성하세요.",
   remoteAccessInfo:
     "원격 접속을 닫거나 서버를 종료/재시작하면 링크가 만료되며, 다시 연결하면 새로운 링크가 생성됩니다. 이 페이지나 브라우저를 닫아도 원격 접속은 유지됩니다.",
+  remoteAccessDnsHelp:
+    "Android Firefox에서 ‘서버를 찾을 수 없음’이 표시되면 Firefox 설정 > 개인 정보 및 보안 > DNS over HTTPS에서 기능을 끈 뒤 다시 접속하세요.",
   remoteAccessTermuxWarning:
     "Termux 환경에서는 Cloudflare Quick Tunnel을 사용할 수 없습니다. Tailscale 등 다른 원격 접속 도구를 사용해 주세요.",
 
@@ -3438,7 +3494,8 @@ export const languageKorean = {
   },
   risuBardRecentMessages: "위키 분석 최근 원문",
   risuBardResponseRecentMessages: "LLM에 전달할 최근 채팅 내역",
-  risuBardResponseExcludeUsers: "과거 사용자 메시지 제외",
+  risuBardResponseExcludeUsers: "응답 생성에서 사용자 메시지 제외",
+  risuBardAnalysisExcludeUsers: "위키 분석에서 사용자 메시지 제외",
   risuBardTurnCanon: "이번 턴 정본",
   risuBardTurnCanonNoChanges: "이번 턴에 변경된 정본 문서가 없습니다.",
   risuBardUndoTurnCanon: "턴 전체 되돌리기",
@@ -3451,6 +3508,10 @@ export const languageKorean = {
   risuBardCanonUndoConflictMissing: "현재 문서를 찾을 수 없어 건너뜀",
   risuBardAnalysisTokenLimit: "AI 분석 토큰 상한",
   risuBardInquiryTargetTokenBudget: "위키 조회 토큰 목표",
+  risuBardBardChanEnabled: "바드쨩 (Bard-chan)",
+  risuBardBardChanModelMode: "바드쨩 모델",
+  risuBardBardChanModelAuxiliary: "보조 모델",
+  risuBardBardChanModelMain: "메인 모델",
   risuBardInquiryEventTokenBudget: "사건 상세 조회 토큰",
   risuBardInquirySourceTokenBudget: "자료별 검색 토큰 상한",
   risuBardInquiryMaximumTokenBudget: "위키 조회 토큰 절대 상한",

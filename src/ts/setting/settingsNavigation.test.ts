@@ -59,6 +59,7 @@ describe('settings navigation registry', () => {
         expect(risuBard?.items.map((item) => item.id)).toEqual([
             'risubard-common',
             'risubard-wiki-prompt',
+            'risubard-grimoire-prompt',
         ])
         expect(isSettingsNavigationItemActive(common!, SettingsRoute.RisuBardChat)).toBe(true)
     })

@@ -164,6 +164,13 @@ export const searchManifestEntries: ManualSearchEntry[] = [
         keywords: ['bardwiki', 'wiki prompt', 'wiki guide', '위키 프롬프트', '위키 가이드'],
         route: SettingsRoute.RisuBardWikiPrompt,
     },
+    {
+        id: 'manual.page.risuBardGrimoirePrompt',
+        label: () => language.risuBardGrimoirePrompt.title,
+        help: () => language.risuBardGrimoirePrompt.description,
+        keywords: ['grimoire', 'metadata prompt', '그리모어 프롬프트', '메타데이터 분석 지시문'],
+        route: SettingsRoute.RisuBardGrimoirePrompt,
+    },
     // ── Standalone hardcoded pages
     {
         id: 'manual.page.migration',

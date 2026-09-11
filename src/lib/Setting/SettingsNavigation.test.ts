@@ -28,6 +28,7 @@ describe('SettingsNavigation', () => {
                 aliases: [SettingsRoute.RisuBardChat],
             }),
             expect.objectContaining({ id: 'risubard-wiki-prompt', route: SettingsRoute.RisuBardWikiPrompt }),
+            expect.objectContaining({ id: 'risubard-grimoire-prompt', route: SettingsRoute.RisuBardGrimoirePrompt }),
         ])
     })
 

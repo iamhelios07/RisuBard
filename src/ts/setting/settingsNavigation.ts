@@ -48,6 +48,7 @@ export const settingsSections: SettingsNavigationSection[] = [
                 scope: 'full',
             },
             { id: 'risubard-wiki-prompt', route: SettingsRoute.RisuBardWikiPrompt, scope: 'full' },
+            { id: 'risubard-grimoire-prompt', route: SettingsRoute.RisuBardGrimoirePrompt, scope: 'full' },
         ],
     },
     {

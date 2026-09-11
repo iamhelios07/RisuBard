@@ -59,6 +59,10 @@ import {
     type WikiPromptPreset,
 } from '../risubard/wikiPromptPreset';
 import {
+    normalizeBardLoreInstructionPresetState,
+    type BardLoreInstructionPreset,
+} from '../lorebook/bardLoreInstructionPreset';
+import {
     ARC_PLOTTER_DEFAULT_PRESET_ID,
     normalizeArcPlotterCustomPresets,
     normalizeArcPlotterPresetSelection,
@@ -988,6 +992,12 @@ export function setDatabase(data:Database){
     }, uuidv4)
     data.risuBardWikiPromptPresets = wikiPromptState.presets
     data.risuBardChatWikiPromptPresetId = wikiPromptState.chatPresetId
+    const grimoirePromptState = normalizeBardLoreInstructionPresetState({
+        presets: data.risuBardGrimoirePromptPresets,
+        activePresetId: data.risuBardGrimoirePromptPresetId,
+    })
+    data.risuBardGrimoirePromptPresets = grimoirePromptState.presets
+    data.risuBardGrimoirePromptPresetId = grimoirePromptState.activePresetId
     for(const char of data.characters){
         if(char.bardLore){
             const normalizedBardLore = normalizeBardLoreOwnerState(
@@ -1743,6 +1753,8 @@ export interface Database{
     risuBardArcPlotterCustomPresets?: ArcPlotterPreset[]
     risuBardWikiPromptPresets?: WikiPromptPreset[]
     risuBardChatWikiPromptPresetId?: string
+    risuBardGrimoirePromptPresets?: BardLoreInstructionPreset[]
+    risuBardGrimoirePromptPresetId?: string
     textAreaTextSize:number
     combineTranslation:boolean
     dynamicAssets:boolean

@@ -7,6 +7,7 @@
     import HotkeySettings from './Pages/HotkeySettings.svelte'
     import RisuBardCommonSettings from './Pages/RisuBardCommonSettings.svelte'
     import RisuBardWikiPromptSettings from './Pages/RisuBardWikiPromptSettings.svelte'
+    import RisuBardGrimoirePromptSettings from './Pages/RisuBardGrimoirePromptSettings.svelte'
     import InlayImageGallery from './Pages/InlayImageGallery.svelte'
     import MigrationSettings from './Pages/MigrationSettings.svelte'
     import ModuleSettings from './Pages/Module/ModuleSettings.svelte'
@@ -119,6 +120,8 @@
                             <RisuBardCommonSettings />
                         {:else if $SettingsMenuIndex === SettingsRoute.RisuBardWikiPrompt}
                             <RisuBardWikiPromptSettings />
+                        {:else if $SettingsMenuIndex === SettingsRoute.RisuBardGrimoirePrompt}
+                            <RisuBardGrimoirePromptSettings />
                         {:else if isExperienceSettingsRoute($SettingsMenuIndex as SettingsRouteValue)}
                             <ExperienceSettingsWorkspace
                                 activeRoute={$SettingsMenuIndex as SettingsRouteValue}

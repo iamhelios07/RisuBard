@@ -149,6 +149,7 @@ function routeLabel(route: SettingsRouteValue): string {
         case SettingsRoute.RisuBardCommon: return language.risuBardSettings.common.title;
         case SettingsRoute.RisuBardChat: return language.risuBardSettings.common.title;
         case SettingsRoute.RisuBardWikiPrompt: return language.risuBardWikiPrompt.title;
+        case SettingsRoute.RisuBardGrimoirePrompt: return language.risuBardGrimoirePrompt.title;
         case SettingsRoute.RemoteAccess: return language.remoteAccess;
         case SettingsRoute.System: return language.system;
         case SettingsRoute.InlayImageGallery: return language.playground.inlayImageGallery;

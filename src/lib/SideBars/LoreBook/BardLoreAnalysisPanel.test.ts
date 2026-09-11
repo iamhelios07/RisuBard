@@ -81,7 +81,7 @@ describe('BardLoreAnalysisPanel', () => {
         requestChatData.mockImplementation(async ({ formated }) => ({
             type: 'success',
             result: JSON.stringify({ entries: JSON.parse(formated[0].content.split('\n').at(-1)).targets.map(({ ref }: { ref: number }) => ({
-                ref, kind: 'location', aliases: [], tags: ['도시'], summary: '도시의 탑', links: [],
+                ref, kind: 'location', activation: 'retrieve', aliases: [], tags: ['도시'], summary: '도시의 탑', links: [],
             })) }),
         }))
         mounted = mount(BardLoreAnalysisPanel, {
@@ -109,7 +109,7 @@ describe('BardLoreAnalysisPanel', () => {
         expect(JSON.parse(requestChatData.mock.calls[1][0].formated[0].content.split('\n').at(-1)).targets[0].content).toBe(longer.content)
     })
 
-    it('resizes the analysis window and its two workbench panes', async () => {
+    it('resizes the analysis window and both workbench splits', async () => {
         mounted = mount(BardLoreAnalysisPanel, {
             target: document.body.appendChild(document.createElement('div')),
             props: {
@@ -135,6 +135,16 @@ describe('BardLoreAnalysisPanel', () => {
         splitter.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
 
         expect(workbench.style.getPropertyValue('--analysis-settings-width')).toBe('376px')
+
+        const settingsSection = settingsPane.querySelector<HTMLElement>('.analysis-settings')!
+        settingsPane.getBoundingClientRect = () => ({ height: 600 } as DOMRect)
+        settingsSection.getBoundingClientRect = () => ({ height: 200 } as DOMRect)
+        const rowSplitter = settingsPane.querySelector<HTMLElement>('[data-bard-lore-analysis-settings-splitter]')!
+        expect(rowSplitter.getAttribute('aria-orientation')).toBe('horizontal')
+
+        rowSplitter.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+
+        expect(settingsPane.style.getPropertyValue('--analysis-settings-height')).toBe('216px')
     })
 
     it('omits the redundant model-request estimate sentence', async () => {
@@ -189,7 +199,7 @@ describe('BardLoreAnalysisPanel', () => {
         expect(headings).toContain('AI 분석은 무엇을 하나요?')
         expect(help?.textContent).toContain('원문은 바꾸지 않습니다')
         expect(help?.textContent).toContain('AI 분석을 사용하지 않는다면')
-        expect(help?.textContent).toContain('AI가 제안하지 않는 기본 키와 활성화 규칙')
+        expect(help?.textContent).toContain('활성화 규칙·프롬프트 역할·링크의 초안')
         expect(help?.textContent).toContain('검색 메타데이터(찾기 위한 이름표)')
         expect(help?.textContent).toContain('토큰은 글의 양을 재는 단위')
         expect(help?.textContent).toContain('프롬프트 역할까지 확인했습니다')
@@ -241,6 +251,7 @@ describe('BardLoreAnalysisPanel', () => {
                     entries: [{
                         ref: 0,
                         kind: 'character',
+                        activation: 'retrieve',
                         aliases: ['탑지기'],
                         tags: [],
                         summary: '도시의 탑을 지키는 인물.',
@@ -257,6 +268,7 @@ describe('BardLoreAnalysisPanel', () => {
                     entries: [{
                         ref: 0,
                         kind: 'character',
+                        activation: 'retrieve',
                         aliases: ['탑지기'],
                         tags: ['인물'],
                         summary: '도시의 탑을 지키는 인물.',
@@ -313,7 +325,7 @@ describe('BardLoreAnalysisPanel', () => {
         requestChatData.mockResolvedValue({
             type: 'success',
             result: JSON.stringify({
-                entries: [{ ref: 0, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
+                entries: [{ ref: 0, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
             }),
         })
         const onSettingsChange = vi.fn()
@@ -561,13 +573,13 @@ describe('BardLoreAnalysisPanel', () => {
             .mockResolvedValueOnce({
                 type: 'success',
                 result: JSON.stringify({
-                    entries: [{ ref: 0, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
+                    entries: [{ ref: 0, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
                 }),
             })
             .mockResolvedValueOnce({
                 type: 'success',
                 result: JSON.stringify({
-                    entries: [{ ref: 1, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 항구.', links: [] }],
+                    entries: [{ ref: 1, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 항구.', links: [] }],
                 }),
             })
         const onAnalysisRunChange = vi.fn()
@@ -602,7 +614,7 @@ describe('BardLoreAnalysisPanel', () => {
             .mockResolvedValueOnce({
                 type: 'success',
                 result: JSON.stringify({
-                    entries: [{ ref: 0, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
+                    entries: [{ ref: 0, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
                 }),
             })
         const onAnalysisRunChange = vi.fn()
@@ -635,7 +647,7 @@ describe('BardLoreAnalysisPanel', () => {
             .mockResolvedValueOnce({
                 type: 'success',
                 result: JSON.stringify({
-                    entries: [{ ref: 0, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
+                    entries: [{ ref: 0, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
                 }),
             })
         const onAnalysisRunChange = vi.fn()
@@ -714,6 +726,7 @@ describe('BardLoreAnalysisPanel', () => {
                 entries: [{
                     ref: 0,
                     kind: 'location',
+                    activation: 'retrieve',
                     aliases: ['타워'],
                     tags: ['도시'],
                     summary: '도시의 탑',
@@ -780,6 +793,7 @@ describe('BardLoreAnalysisPanel', () => {
                     entries: [{
                         ref: 0,
                         kind: 'location',
+                        activation: 'retrieve',
                         aliases: [],
                         tags: ['도시'],
                         summary: '보존될 초안',
@@ -888,7 +902,7 @@ describe('BardLoreAnalysisPanel', () => {
         requestChatData.mockResolvedValue({
             type: 'success',
             result: JSON.stringify({
-                entries: [{ ref: 0, kind: 'location', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
+                entries: [{ ref: 0, kind: 'location', activation: 'retrieve', aliases: [], tags: ['장소'], summary: '도시의 탑.', links: [] }],
             }),
         })
         mounted = mount(BardLoreAnalysisPanel, {

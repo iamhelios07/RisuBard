@@ -1501,6 +1501,8 @@ export interface Database{
     togglePresets?:TogglePreset[]
     personaBuilderPromptPresets?:PersonaBuilderPromptPreset[]
     loreBuilderPromptPresets?:LoreBuilderPromptPreset[]
+    personaBuilderStylePromptPresetId?:string
+    loreBuilderStylePromptPresetId?:string
     sdProvider: string
     webUiUrl:string
     sdSteps:number

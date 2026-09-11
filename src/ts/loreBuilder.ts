@@ -31,6 +31,16 @@ export const LORE_BUILDER_BUILTIN_PRESETS: readonly LoreBuilderPromptPreset[] = 
     { id: 'builtin:lore-style-en', kind: 'style', name: 'Structured Lorebook (English)', content: LORE_STYLE_PROMPT_EN },
 ]
 
+export function resolveLoreBuilderPromptPreset(
+    presets: LoreBuilderPromptPreset[],
+    kind: LoreBuilderPromptKind,
+    id: string | undefined,
+): LoreBuilderPromptPreset | undefined {
+    if (!id) return undefined
+    return [...LORE_BUILDER_BUILTIN_PRESETS, ...presets]
+        .find((preset) => preset.kind === kind && preset.id === id)
+}
+
 export interface LoreBuilderSelections {
     systemPrompt: boolean
     characterDescription: boolean

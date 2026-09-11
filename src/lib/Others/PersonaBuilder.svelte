@@ -14,6 +14,7 @@
         buildPersonaBuilderMessages,
         collectPersonaBuilderSources,
         matchPersonaBuilderCharacterLorebook,
+        resolvePersonaBuilderPromptPreset,
         type PersonaBuilderSelections,
         type PersonaBuilderSourceSnapshot,
     } from 'src/ts/personaBuilder'
@@ -87,10 +88,15 @@
             characterLorebook: !!sources.characterLorebook,
             moduleLorebook: !!sources.moduleLorebook,
         }
+        const selectedStylePreset = resolvePersonaBuilderPromptPreset(
+            DBState.db.personaBuilderPromptPresets ?? [],
+            'style',
+            DBState.db.personaBuilderStylePromptPresetId,
+        )
         taskInstruction = DEFAULT_PERSONA_BUILDER_TASK_PROMPT
-        styleInstruction = ''
+        styleInstruction = selectedStylePreset?.content ?? ''
         taskPresetId = 'builtin:task-default'
-        stylePresetId = ''
+        stylePresetId = selectedStylePreset?.id ?? ''
         userInstruction = ''
         originalDraft = currentDescription
         draft = initialDraft

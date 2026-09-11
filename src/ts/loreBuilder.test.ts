@@ -9,6 +9,7 @@ import {
     deleteLoreBuilderUserPreset,
     loadLoreBuilderSelections,
     overwriteLoreBuilderUserPreset,
+    resolveLoreBuilderPromptPreset,
     saveLoreBuilderSelections,
 } from './loreBuilder'
 
@@ -25,6 +26,16 @@ const lore = (id: string, content: string): loreBook => ({
 })
 
 describe('lore builder prompt contract', () => {
+    it('resolves a persisted style preset from built-ins or user presets', () => {
+        const userPreset = { id: 'saved-style', kind: 'style' as const, name: 'Saved style', content: 'Keep lore style' }
+
+        expect(resolveLoreBuilderPromptPreset([], 'style', 'builtin:lore-style-en')?.content)
+            .toContain('English lorebook writing rules')
+        expect(resolveLoreBuilderPromptPreset([userPreset], 'style', 'saved-style')).toEqual(userPreset)
+        expect(resolveLoreBuilderPromptPreset([userPreset], 'style', 'missing')).toBeUndefined()
+        expect(resolveLoreBuilderPromptPreset([userPreset], 'task', 'saved-style')).toBeUndefined()
+    })
+
     it('ships a structured, factual, output-only lorebook prompt', () => {
         expect(DEFAULT_LORE_BUILDER_TASK_PROMPT).toContain('롤플레잉')
         expect(DEFAULT_LORE_BUILDER_TASK_PROMPT).toContain('Markdown')

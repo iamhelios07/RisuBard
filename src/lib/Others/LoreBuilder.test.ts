@@ -82,10 +82,14 @@ describe('lore builder UI contract', () => {
 
     it('persists lore builder switches, dialog size, split, and textarea heights', () => {
         const builder = source('src/lib/Others/LoreBuilder.svelte')
+        const presetEditor = source('src/lib/Others/LorePromptPresetEditor.svelte')
         const splitter = source('src/lib/UI/GUI/DraftSplitHandle.svelte')
 
         expect(builder).toContain('loadLoreBuilderSelections')
         expect(builder).toContain('saveLoreBuilderSelections')
+        expect(builder).toContain('DBState.db.loreBuilderStylePromptPresetId')
+        expect(builder).toContain('resolveLoreBuilderPromptPreset')
+        expect(presetEditor).toContain('DBState.db.loreBuilderStylePromptPresetId = id || undefined')
         expect(builder).toContain('resizeStorageKey="lore-builder-dialog"')
         expect(builder).toContain('resizeStorageKey="lore-builder-draft-split"')
         expect(builder).toContain("use:persistElementHeight={'lore-builder-instruction'}")

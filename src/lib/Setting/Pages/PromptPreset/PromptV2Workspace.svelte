@@ -10,6 +10,7 @@
         SlidersHorizontalIcon,
     } from '@lucide/svelte'
     import { language } from 'src/lang'
+    import { tick } from 'svelte'
     import { DBState } from 'src/ts/stores.svelte'
     import type { PromptItem } from 'src/ts/process/prompt'
     import {
@@ -20,6 +21,7 @@
         parsePromptV2Text,
         parsePromptV2ToggleTree,
         promptV2PreviewDefaultValue,
+        replacePromptV2BodyMatches,
         savePromptV2PreviewState,
     } from 'src/ts/promptV2'
     import ShButton from 'src/lib/UI/GUI/ShButton.svelte'
@@ -35,6 +37,13 @@
     let compactPane = $state<'list' | 'editor' | 'preview'>('editor')
     let previewValues = $state<Record<string, string>>({})
     let hydratedPreviewScope = $state('')
+    let blockEditor: PromptV2BlockEditor | undefined = $state()
+
+    async function findInSelectedBlock(query: string) {
+        compactPane = 'editor'
+        await tick()
+        blockEditor?.findInBody(query)
+    }
 
     const promptItems = $derived(DBState.db.promptTemplate ?? [])
     const toggleTree = $derived(parsePromptV2ToggleTree(DBState.db.customPromptTemplateToggle ?? ''))
@@ -113,6 +122,7 @@
     }
 
     function addBlock() {
+        blockEditor?.flushPendingText()
         const next: PromptItem[] = [...promptItems]
         const insertAt = selectedIndex < 0 ? next.length : selectedIndex + 1
         next.splice(insertAt, 0, {
@@ -127,7 +137,19 @@
         compactPane = 'editor'
     }
 
+    function duplicateBlock() {
+        blockEditor?.flushPendingText()
+        if (selectedIndex < 0 || selectedIndex >= promptItems.length) return
+        const insertAt = selectedIndex + 1
+        const next = [...promptItems]
+        next.splice(insertAt, 0, { ...promptItems[selectedIndex] } as PromptItem)
+        replaceTemplate(next)
+        selectedIndex = insertAt
+        compactPane = 'editor'
+    }
+
     function removeBlock(index: number) {
+        blockEditor?.flushPendingText()
         const next = [...promptItems]
         next.splice(index, 1)
         replaceTemplate(next)
@@ -135,6 +157,7 @@
     }
 
     function moveBlock(index: number, direction: -1 | 1) {
+        blockEditor?.flushPendingText()
         const target = index + direction
         if (target < 0 || target >= promptItems.length) return
         const next = [...promptItems]
@@ -152,13 +175,42 @@
     }
 
     function selectBlock(index: number) {
+        blockEditor?.flushPendingText()
         selectedIndex = index
         compactPane = 'editor'
     }
 
     function openToggleSetup() {
+        blockEditor?.flushPendingText()
         mode = 'toggles'
         compactPane = 'editor'
+    }
+
+    function setWorkspaceMode(nextMode: 'prompts' | 'toggles') {
+        if (nextMode === mode) return
+        blockEditor?.flushPendingText()
+        mode = nextMode
+    }
+
+    function replaceOneMatch(search: string, replacement: string) {
+        if (blockEditor?.replaceCurrentBodyMatch(search, replacement)) return
+        const result = replacePromptV2BodyMatches(
+            DBState.db.promptTemplate ?? [],
+            search,
+            replacement,
+            selectedIndex,
+        )
+        if (result.replaced > 0) replaceTemplate(result.items)
+    }
+
+    function replaceAllMatches(search: string, replacement: string) {
+        blockEditor?.flushPendingText()
+        const result = replacePromptV2BodyMatches(
+            DBState.db.promptTemplate ?? [],
+            search,
+            replacement,
+        )
+        if (result.replaced > 0) replaceTemplate(result.items)
     }
 </script>
 
@@ -169,7 +221,7 @@
                 type="button"
                 class:toolbar-segment__active={mode === 'prompts'}
                 aria-pressed={mode === 'prompts'}
-                onclick={() => mode = 'prompts'}
+                onclick={() => setWorkspaceMode('prompts')}
             >
                 <BracesIcon size={15} />
                 {language.promptV2.promptsMode}
@@ -178,16 +230,14 @@
                 type="button"
                 class:toolbar-segment__active={mode === 'toggles'}
                 aria-pressed={mode === 'toggles'}
-                onclick={() => mode = 'toggles'}
+                onclick={() => setWorkspaceMode('toggles')}
             >
                 <SlidersHorizontalIcon size={15} />
                 {language.promptV2.togglesMode}
             </button>
         </div>
 
-        <p class="hidden min-w-0 grow truncate px-2 text-xs text-textcolor2 xl:block">{language.promptV2.workspaceHelp}</p>
-
-        <div class="hidden items-center gap-1 lg:flex">
+        <div class="ml-auto hidden items-center gap-1 lg:flex">
             <ShButton
                 size="sm"
                 variant={showList ? 'soft-primary' : 'ghost'}
@@ -238,8 +288,12 @@
                         {previewValues}
                         onSelect={selectBlock}
                         onAdd={addBlock}
+                        onDuplicate={duplicateBlock}
                         onRemove={removeBlock}
                         onMove={moveBlock}
+                        onFind={findInSelectedBlock}
+                        onReplaceOne={replaceOneMatch}
+                        onReplaceAll={replaceAllMatches}
                     />
                 {:else}
                     <PromptV2ToggleEditor view="library" bind:template={DBState.db.customPromptTemplateToggle} />
@@ -250,6 +304,7 @@
         <div data-prompt-v2-editor class="workspace-pane workspace-pane--editor">
             {#if mode === 'prompts'}
                 <PromptV2BlockEditor
+                    bind:this={blockEditor}
                     item={selectedItem}
                     definitions={toggleTree.definitions}
                     {previewValues}
@@ -278,7 +333,10 @@
     .prompt-v2-workspace {
         container: prompt-v2 / inline-size;
         display: flex;
-        min-height: 34rem;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        max-height: 100%;
         flex: 1;
         flex-direction: column;
         overflow: hidden;
@@ -356,6 +414,14 @@
         flex-shrink: 0;
         overflow: hidden;
     }
+    :global(.prompt-v2-pane-header.prompt-v2-editor-header) {
+        height: auto;
+        min-height: 3.5rem;
+    }
+    :global(.prompt-v2-pane-header.prompt-v2-block-list-header) {
+        height: auto;
+        min-height: 9.5rem;
+    }
 
     .compact-pane-tabs {
         display: none;
@@ -366,7 +432,6 @@
     }
 
     @container prompt-v2 (max-width: 68.75rem) {
-        .prompt-v2-workspace { min-height: 38rem; }
         .compact-pane-tabs { display: grid; }
         .workspace-grid,
         .workspace-grid--no-list,

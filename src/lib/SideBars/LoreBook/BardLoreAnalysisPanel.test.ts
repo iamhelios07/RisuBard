@@ -2,11 +2,12 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
+import { changeLanguage } from 'src/lang'
 import { createBardLoreSettings, fingerprintBardLoreEntry, type BardLoreEntry } from 'src/ts/lorebook/bardLore'
 import BardLoreAnalysisPanel from './BardLoreAnalysisPanel.svelte'
 
 const requestChatData = vi.hoisted(() => vi.fn())
-const tokenizerMock = vi.hoisted(() => vi.fn(async () => 20))
+const tokenizerMock = vi.hoisted(() => vi.fn(async (_value: string) => 20))
 const alertNormalMock = vi.hoisted(() => vi.fn())
 vi.mock('src/ts/process/request/request', () => ({ requestChatData }))
 vi.mock('src/ts/tokenizer', () => ({ tokenize: tokenizerMock }))
@@ -43,11 +44,71 @@ afterEach(async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 30))
     document.body.replaceChildren()
     requestChatData.mockReset()
-    tokenizerMock.mockClear()
+    tokenizerMock.mockReset().mockResolvedValue(20)
     alertNormalMock.mockClear()
+    changeLanguage('en')
 })
 
 describe('BardLoreAnalysisPanel', () => {
+    it('ignores an older budget error after the input allowance has been increased', async () => {
+        let finishOldMeasurement!: (tokens: number) => void
+        tokenizerMock.mockImplementationOnce(() => new Promise<number>((resolve) => { finishOldMeasurement = resolve }))
+        mounted = mount(BardLoreAnalysisPanel, {
+            target: document.body.appendChild(document.createElement('div')),
+            props: { entries: [source], settings: createBardLoreSettings({ analysisInputTokens: 30 }), onChange: vi.fn() },
+        })
+        await tick()
+        document.body.querySelector<HTMLButtonElement>('[data-bard-lore-analysis-open]')!.click()
+        await vi.waitFor(() => expect(tokenizerMock).toHaveBeenCalledOnce())
+        const input = document.body.querySelector<HTMLInputElement>('[data-bard-lore-analysis-setting="analysisInputTokens"]')!
+        input.value = '100'
+        input.dispatchEvent(new Event('change', { bubbles: true }))
+        await vi.waitFor(() => expect(document.body.querySelector('[data-bard-lore-analysis-plan]')).not.toBeNull())
+        finishOldMeasurement(20)
+        await vi.waitFor(() => expect(tokenizerMock).toHaveBeenCalledTimes(4))
+        await tick()
+        expect(document.body.querySelector('.error')).toBeNull()
+        expect(document.body.querySelector('[data-bard-lore-analyze]')).not.toBeNull()
+        expect(requestChatData).not.toHaveBeenCalled()
+    })
+
+    it('explains oversized lore input and recommends enough room for every complete selected entry', async () => {
+        changeLanguage('ko')
+        tokenizerMock.mockImplementation(async (value: string) => value.length)
+        const long = { ...structuredClone(source), content: '가'.repeat(17_655), comment: '긴 배포 로어' }
+        const longer = { ...structuredClone(source), id: 'longer', content: '나'.repeat(21_000), comment: '더 긴 로어' }
+        const onSettingsChange = vi.fn()
+        requestChatData.mockImplementation(async ({ formated }) => ({
+            type: 'success',
+            result: JSON.stringify({ entries: JSON.parse(formated[0].content.split('\n').at(-1)).targets.map(({ ref }: { ref: number }) => ({
+                ref, kind: 'location', aliases: [], tags: ['도시'], summary: '도시의 탑', links: [],
+            })) }),
+        }))
+        mounted = mount(BardLoreAnalysisPanel, {
+            target: document.body.appendChild(document.createElement('div')),
+            props: { entries: [long, longer], settings: createBardLoreSettings(), onChange: vi.fn(), onSettingsChange },
+        })
+        await tick()
+        document.body.querySelector<HTMLButtonElement>('[data-bard-lore-analysis-open]')!.click()
+        await vi.waitFor(() => {
+            const error = document.body.querySelector('.error')?.textContent ?? ''
+            expect(error).toContain('긴 배포 로어')
+            expect(error).toContain('12,000')
+            expect(error).toContain('최대 입력 토큰')
+            expect(error).toContain('추천 설정')
+        })
+        expect(requestChatData).not.toHaveBeenCalled()
+        document.body.querySelector<HTMLButtonElement>('[data-bard-lore-analysis-recommend]')!.click()
+        await vi.waitFor(() => expect(document.body.querySelector('[data-bard-lore-analysis-plan]')).not.toBeNull())
+        expect(document.body.querySelector('.error')).toBeNull()
+        expect(onSettingsChange.mock.calls.at(-1)?.[0].analysisInputTokens).toBeGreaterThan(21_000)
+        expect(requestChatData).not.toHaveBeenCalled()
+        document.body.querySelector<HTMLButtonElement>('[data-bard-lore-analyze]')!.click()
+        await vi.waitFor(() => expect(requestChatData).toHaveBeenCalledTimes(2))
+        expect(JSON.parse(requestChatData.mock.calls[0][0].formated[0].content.split('\n').at(-1)).targets[0].content).toBe(long.content)
+        expect(JSON.parse(requestChatData.mock.calls[1][0].formated[0].content.split('\n').at(-1)).targets[0].content).toBe(longer.content)
+    })
+
     it('resizes the analysis window and its two workbench panes', async () => {
         mounted = mount(BardLoreAnalysisPanel, {
             target: document.body.appendChild(document.createElement('div')),

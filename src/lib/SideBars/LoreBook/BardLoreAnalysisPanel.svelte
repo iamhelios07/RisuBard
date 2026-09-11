@@ -33,6 +33,7 @@
     } from 'src/ts/lorebook/bardLoreAnalysisSettings'
     import { orderLorebookEntriesForDisplay } from 'src/ts/lorebook/workspaceOperations'
     import {
+        BardLoreAnalysisBudgetError,
         applyBardLoreAnalysisDraft,
         auditBardLoreAnalysisDraft,
         auditBardLoreMetadata,
@@ -156,9 +157,12 @@
     }
 
     async function prepareTargets(targets: BardLoreEntry[], runtimeSettings = workingSettings) {
+        const sequence = ++replanSequence
         error = ''
         conflicts = []
         plan = null
+        plannedTargets = targets
+        planning = targets.length > 0
         runtimeSettings = createBardLoreSettings(runtimeSettings)
         if (targets.length === 0) {
             error = language.lorebookWorkspace.bardAnalysisNoTargets
@@ -171,9 +175,7 @@
                 DBState.db.risuBardGrimoireLanguage,
                 normalizeWikiWritingLanguage(DBState.db.risuBardWikiWritingLanguage),
             )
-            plannedTargets = targets
-            plannedLanguage = analysisLanguage
-            plan = await planBardLoreAnalysisBatches(
+            const nextPlan = await planBardLoreAnalysisBatches(
                 targets,
                 entries,
                 runtimeSettings,
@@ -181,13 +183,24 @@
                 analysisLanguage,
                 'ko',
             )
+            if (sequence !== replanSequence) return
+            plannedLanguage = analysisLanguage
+            plan = nextPlan
         }
         catch (cause) {
-            error = cause instanceof Error ? cause.message : String(cause)
+            if (sequence === replanSequence) error = planningError(cause)
         }
         finally {
-            planning = false
+            if (sequence === replanSequence) planning = false
         }
+    }
+
+    function planningError(cause: unknown): string {
+        if (cause instanceof BardLoreAnalysisBudgetError && cause.details) {
+            const { entryName, inputTokens, limit } = cause.details
+            return language.lorebookWorkspace.bardAnalysisInputLimitExceeded(entryName, inputTokens, limit)
+        }
+        return cause instanceof Error ? cause.message : String(cause)
     }
 
     async function prepare(runtimeSettings = workingSettings) {
@@ -286,6 +299,8 @@
     async function replanSelectedTargets(runtimeSettings = workingSettings) {
         const targets = availableTargets.filter((entry) => selectedTargetIds.has(entry.id))
         if (targets.length === 0) {
+            ++replanSequence
+            planning = false
             plannedTargets = []
             plan = null
             error = ''
@@ -382,18 +397,44 @@
         notifySuccess(language.lorebookWorkspace.bardAnalysisDefaultSaved)
     }
 
-    function applyRecommendedSettings() {
-        const recommended = recommendBardLoreAnalysisSettings({
-            targetCount: plannedTargets.length || selectedTargetIds.size,
-            estimatedInputTokens: plan?.totalInputTokens ?? workingSettings.analysisInputTokens,
-        })
-        if (currentRun) recommended.analysisLinkedDepth = workingSettings.analysisLinkedDepth
-        const next = createBardLoreSettings({ ...workingSettings, ...recommended })
-        workingSettings = next
-        onSettingsChange(next)
-        if (currentRun) void replanCurrentRun(next)
-        else void replanSelectedTargets(next)
-        notifySuccess(language.lorebookWorkspace.bardAnalysisRecommendedApplied)
+    async function applyRecommendedSettings() {
+        const completedIds = new Set(currentRun?.batches.filter((batch) => batch.status === 'complete').flatMap((batch) => batch.targetIds))
+        const targets = (currentRun ? displayRunTargets() : availableTargets.filter((entry) => selectedTargetIds.has(entry.id)))
+            .filter((entry) => !completedIds.has(entry.id))
+        if (targets.length === 0) return
+        const sequence = ++replanSequence
+        planning = true
+        error = ''
+        try {
+            const { tokenize } = await import('src/ts/tokenizer')
+            // Measure full single-entry requests locally, even when the current
+            // allowance cannot produce a plan. This never sends a model request.
+            const estimate = await planBardLoreAnalysisBatches(targets, entries, createBardLoreSettings({
+                ...workingSettings, analysisBatchEntries: 1, analysisInputTokens: Number.MAX_SAFE_INTEGER,
+            }), tokenize, currentRun ? currentRun.languageSnapshot ?? 'bilingual' : resolveBardLoreAnalysisLanguage(
+                DBState.db.risuBardGrimoireLanguage,
+                normalizeWikiWritingLanguage(DBState.db.risuBardWikiWritingLanguage),
+            ), 'ko')
+            if (sequence !== replanSequence) return
+            const recommended = recommendBardLoreAnalysisSettings({
+                targetCount: targets.length,
+                estimatedInputTokens: estimate.totalInputTokens,
+                minimumInputTokens: estimate.batches.reduce((largest, batch) => Math.max(largest, batch.inputTokens), 0),
+            })
+            if (currentRun) recommended.analysisLinkedDepth = workingSettings.analysisLinkedDepth
+            const next = createBardLoreSettings({ ...workingSettings, ...recommended })
+            workingSettings = next
+            onSettingsChange(next)
+            if (currentRun) await replanCurrentRun(next)
+            else await replanSelectedTargets(next)
+            notifySuccess(language.lorebookWorkspace.bardAnalysisRecommendedApplied)
+        }
+        catch (cause) {
+            if (sequence === replanSequence) error = planningError(cause)
+        }
+        finally {
+            if (sequence === replanSequence) planning = false
+        }
     }
 
     async function replanCurrentRun(runtimeSettings: BardLoreSettings) {
@@ -440,7 +481,7 @@
             })
         }
         catch (cause) {
-            if (sequence === replanSequence) error = cause instanceof Error ? cause.message : String(cause)
+            if (sequence === replanSequence) error = planningError(cause)
         }
         finally {
             if (sequence === replanSequence) planning = false

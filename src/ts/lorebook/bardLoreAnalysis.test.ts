@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createRequire } from 'node:module'
 import type { BardLoreEntry } from './bardLore'
 import { fingerprintBardLoreEntry } from './bardLore'
 import {
@@ -106,6 +107,32 @@ describe('Bard Lore AI analysis', () => {
         expect(plan.batches.map((batch) => batch.inputTokens)).toEqual([80, 55])
         expect(plan.totalInputTokens).toBe(135)
         expect(seen.filter((value) => value.includes('"linkCatalog"')).length).toBeGreaterThan(0)
+    })
+
+    it('reports the full input required for a 17,655-character entry and accepts that configured allowance', async () => {
+        const { get_encoding } = createRequire(import.meta.url)('@dqbd/tiktoken')
+        const encoding = get_encoding('cl100k_base')
+        try {
+            const source = entry('long-lore')
+            source.comment = '긴 배포 로어'
+            source.content = '도시의 탑지기는 광장을 지키며 방문객에게 오래된 역사를 들려준다. '.repeat(600).slice(0, 17_655)
+            expect(source.content).toHaveLength(17_655)
+            const settings = createBardLoreSettings()
+            const tokenize = async (value: string) => encoding.encode(value).length
+            const prompt = buildBardLoreAnalysisPrompt([source], [source], settings.router.filterFacetKeys)
+            const required = await tokenize(prompt) + await tokenize(bardLoreAnalysisSchema)
+            expect(required).toBeGreaterThan(settings.analysisInputTokens)
+            await expect(planBardLoreAnalysisBatches([source], [source], settings, tokenize)).rejects.toMatchObject({
+                details: { entryId: source.id, entryName: source.comment, inputTokens: required, limit: settings.analysisInputTokens },
+            })
+            const plan = await planBardLoreAnalysisBatches([source], [source], {
+                ...settings, analysisInputTokens: required,
+            }, tokenize)
+            expect(plan.batches[0].inputTokens).toBe(required)
+            expect(plan.batches[0].entries[0].content).toBe(source.content)
+        } finally {
+            encoding.free()
+        }
     })
 
     it('keeps completed batch candidates when a later batch fails', () => {

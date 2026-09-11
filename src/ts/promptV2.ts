@@ -3,7 +3,7 @@ import type { PromptItem } from './process/prompt'
 import { risuChatParser } from './parser/parser.svelte'
 
 export type PromptV2Join = 'and' | 'or'
-export type PromptV2Operator = 'is' | 'isnot'
+export type PromptV2Operator = 'is' | 'isnot' | 'greater' | 'greaterequal' | 'less' | 'lessequal'
 
 export interface PromptV2Condition {
     key: string
@@ -54,8 +54,15 @@ function compileComparison(condition: PromptV2Condition): string {
     if (!isSafeCBSArgument(condition.key) || !isSafeCBSArgument(condition.value)) {
         throw new Error('Prompt V2 condition keys and values cannot contain braces, line breaks, or double colons.')
     }
-    const fn = condition.operator === 'isnot' ? 'notequal' : 'equal'
-    return `{{${fn}::{{getglobalvar::${condition.key}}}::${condition.value}}}`
+    const fn: Record<PromptV2Operator, string> = {
+        is: 'equal',
+        isnot: 'notequal',
+        greater: 'greater',
+        greaterequal: 'greater_equal',
+        less: 'less',
+        lessequal: 'less_equal',
+    }
+    return `{{${fn[condition.operator]}::{{getglobalvar::${condition.key}}}::${condition.value}}}`
 }
 
 export function compilePromptV2Text(body: string, activation: PromptV2Activation | null): string {
@@ -64,10 +71,41 @@ export function compilePromptV2Text(body: string, activation: PromptV2Activation
     return `{{#when::keep::${expression}}}\n${body}\n{{/when}}`
 }
 
+export interface PromptV2BodyInsertion {
+    body: string
+    selectionStart: number
+    selectionEnd: number
+}
+
+export function insertPromptV2BodyCondition(
+    source: string,
+    selectionStart: number,
+    selectionEnd: number,
+    activation: PromptV2Activation,
+): PromptV2BodyInsertion {
+    const start = Math.max(0, Math.min(source.length, Math.min(selectionStart, selectionEnd)))
+    const end = Math.max(start, Math.min(source.length, Math.max(selectionStart, selectionEnd)))
+    if (activation.conditions.length === 0) return { body: source, selectionStart: start, selectionEnd: end }
+    const selected = source.slice(start, end)
+    const comparisons = activation.conditions.map(compileComparison)
+    const expression = comparisons.slice(1).reduce(
+        (left, right) => `{{${activation.join}::${left}::${right}}}`,
+        comparisons[0],
+    )
+    const opening = `{{#if ${expression}}}`
+    const wrapped = `${opening}\n${selected}\n{{/if}}`
+    const bodyOffset = opening.length + 1
+    return {
+        body: source.slice(0, start) + wrapped + source.slice(end),
+        selectionStart: start + bodyOffset,
+        selectionEnd: start + bodyOffset + selected.length,
+    }
+}
+
 function parseV2Expression(expression: string): PromptV2Activation | null {
     const conditions: PromptV2Condition[] = []
     const joins: PromptV2Join[] = []
-    const comparison = /\{\{(equal|notequal)::\{\{getglobalvar::([^{}\r\n]+)\}\}::([^{}\r\n]+)\}\}/y
+    const comparison = /\{\{(equal|notequal|greater|greater_equal|less|less_equal)::\{\{getglobalvar::([^{}\r\n]+)\}\}::([^{}\r\n]+)\}\}/y
     let cursor = 0
 
     while (cursor < expression.length) {
@@ -76,7 +114,10 @@ function parseV2Expression(expression: string): PromptV2Activation | null {
         if (!match) return null
         conditions.push({
             key: match[2],
-            operator: match[1] === 'notequal' ? 'isnot' : 'is',
+            operator: ({
+                equal: 'is', notequal: 'isnot', greater: 'greater', greater_equal: 'greaterequal',
+                less: 'less', less_equal: 'lessequal',
+            } as Record<string, PromptV2Operator>)[match[1]],
             value: match[3],
         })
         cursor = comparison.lastIndex
@@ -111,8 +152,16 @@ export function evaluatePromptV2Activation(
 ): boolean {
     if (!activation || activation.conditions.length === 0) return true
     const results = activation.conditions.map((condition) => {
-        const equal = (values[condition.key] ?? '') === condition.value
-        return condition.operator === 'isnot' ? !equal : equal
+        const actual = values[condition.key] ?? ''
+        if (condition.operator === 'is') return actual === condition.value
+        if (condition.operator === 'isnot') return actual !== condition.value
+        const left = Number(actual)
+        const right = Number(condition.value)
+        if (!Number.isFinite(left) || !Number.isFinite(right)) return false
+        if (condition.operator === 'greater') return left > right
+        if (condition.operator === 'greaterequal') return left >= right
+        if (condition.operator === 'less') return left < right
+        return left <= right
     })
     return activation.join === 'or' ? results.some(Boolean) : results.every(Boolean)
 }
@@ -316,6 +365,28 @@ export interface PromptV2PreviewStorage {
     removeItem(key: string): unknown
 }
 
+export type PromptV2EditorMode = 'source' | 'visual'
+const editorModeStorageKey = 'risubard:prompt-v2-editor-mode:v1'
+
+export function loadPromptV2EditorMode(storage?: PromptV2PreviewStorage): PromptV2EditorMode {
+    if (!storage) {
+        try { storage = typeof localStorage === 'undefined' ? undefined : localStorage } catch {}
+    }
+    try {
+        const value = storage?.getItem(editorModeStorageKey)
+        return value === 'visual' ? 'visual' : 'source'
+    } catch {
+        return 'source'
+    }
+}
+
+export function savePromptV2EditorMode(mode: PromptV2EditorMode, storage?: PromptV2PreviewStorage): void {
+    if (!storage) {
+        try { storage = typeof localStorage === 'undefined' ? undefined : localStorage } catch {}
+    }
+    try { storage?.setItem(editorModeStorageKey, mode) } catch {}
+}
+
 const previewStorageKey = (presetId: string) => `risubard:prompt-v2-preview:${encodeURIComponent(presetId)}`
 
 export function loadPromptV2PreviewState(
@@ -402,4 +473,57 @@ export function setPromptV2TextSource(item: PromptItem, source: string): void {
     ) {
         item.innerFormat = source
     }
+}
+
+function promptV2BodySearchExpression(search: string): RegExp | null {
+    const query = search.trim()
+    if (!query) return null
+    return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+}
+
+export function countPromptV2BodyMatches(item: PromptItem, search: string): number {
+    const source = getPromptV2TextSource(item)
+    const expression = promptV2BodySearchExpression(search)
+    if (!source || !expression) return 0
+    return Array.from(parsePromptV2Text(source.source).body.matchAll(expression)).length
+}
+
+export function replacePromptV2BodyMatches(
+    items: PromptItem[],
+    search: string,
+    replacement: string,
+    selectedIndex?: number,
+): { items: PromptItem[]; replaced: number } {
+    const expression = promptV2BodySearchExpression(search)
+    if (!expression) return { items, replaced: 0 }
+
+    const targetIndexes = selectedIndex === undefined
+        ? items.map((_, index) => index)
+        : [selectedIndex]
+    let next = items
+    let replaced = 0
+
+    for (const index of targetIndexes) {
+        const item = items[index]
+        const source = item && getPromptV2TextSource(item)
+        if (!source) continue
+        const parsed = parsePromptV2Text(source.source)
+        const matches = Array.from(parsed.body.matchAll(expression))
+        const replacing = selectedIndex === undefined ? matches : matches.slice(0, 1)
+        if (replacing.length === 0) continue
+
+        const match = replacing[0]
+        const changedBody = selectedIndex === undefined
+            ? parsed.body.replace(expression, () => replacement)
+            : parsed.body.slice(0, match.index)
+                + replacement
+                + parsed.body.slice((match.index ?? 0) + match[0].length)
+        const changed = { ...item } as PromptItem
+        setPromptV2TextSource(changed, compilePromptV2Text(changedBody, parsed.activation))
+        if (next === items) next = [...items]
+        next[index] = changed
+        replaced += replacing.length
+    }
+
+    return { items: next, replaced }
 }

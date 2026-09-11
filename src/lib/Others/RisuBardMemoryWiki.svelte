@@ -113,6 +113,7 @@
         null
     )
     let requestSequence = 0
+    let loadAbortController: AbortController | undefined
     let loadedScope = ''
     let dockElement = $state<HTMLElement | null>(null)
     let workspaceSplitElement = $state<HTMLElement | null>(null)
@@ -301,6 +302,9 @@
     }
 
     async function loadWiki() {
+        loadAbortController?.abort()
+        const controller = new AbortController()
+        loadAbortController = controller
         const sequence = ++requestSequence
         const scope = `${characterId}\u0000${wikiChatId}`
         const refreshingCurrentScope = loadedScope === scope
@@ -316,6 +320,7 @@
                 chatId: wikiChatId,
                 fetchImpl: fetch,
                 createAuth: () => forageStorage.createAuth(),
+                signal: controller.signal,
             })
             if (sequence === requestSequence) {
                 wiki = loaded
@@ -337,8 +342,18 @@
             }
         }
         finally {
+            if (loadAbortController === controller) {
+                loadAbortController = undefined
+            }
             if (sequence === requestSequence) loading = false
         }
+    }
+
+    function cancelWikiLoad() {
+        requestSequence += 1
+        loadAbortController?.abort()
+        loadAbortController = undefined
+        loading = false
     }
 
     async function forceWikiUpdate() {
@@ -602,13 +617,16 @@
     }
 
     $effect(() => {
-        void open
-        if (!characterId || !wikiChatId) return
+        if (!open || !characterId || !wikiChatId) {
+            cancelWikiLoad()
+            return
+        }
         void loadWiki()
+        return cancelWikiLoad
     })
 
     $effect(() => {
-        if (!characterId || !wikiChatId || !onExecuteWikiCommand) return
+        if (!open || !characterId || !wikiChatId || !onExecuteWikiCommand) return
         bardChatUpdatedIds = null
         bardChatUndoAvailable = false
         void refreshBardChatUndoStatus()
@@ -623,7 +641,7 @@
             const detail = (event as CustomEvent<
                 RisuBardMemoryUpdatedDetail
             >).detail
-            if (detail?.characterId !== characterId
+            if (!open || detail?.characterId !== characterId
                 || detail.chatId !== wikiChatId) return
             void loadWiki()
         }
